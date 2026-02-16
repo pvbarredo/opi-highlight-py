@@ -20,8 +20,8 @@ Create a Python program that reads a CSV file with timestamps and automatically 
 - **Process:** Match camera names in CSV to video filenames in folder
 - **Output:** Extract clips with the following logic:
   - **Start time:** timestamp - 3 seconds
-  - **End time:** timestamp + 2 seconds
-  - **Total clip duration:** 5 seconds per highlight
+  - **End time:** timestamp + 3 seconds
+  - **Total clip duration:** 6 seconds per highlight
 
 ### Video File Matching Logic
 - Script accepts a **folder path** as input (e.g., `video_files/`)
@@ -65,13 +65,19 @@ Placement,Camera,Time,Side
 - **Detects "Time" column** automatically (supports: Time, time, Timestamp, timestamp)
 - **Dynamic video loading:** Matches camera names to files in folder
 - **Video caching:** Loads each camera's video once for efficiency
-- **Output format:** `{video}_{Camera}_clip{Placement}_{timestamp}s.mp4`
+- **Output format:** `{video}_clip{Placement:02d}_HH_MM_SS.mp4`
+  - Example: `Cam2-02112026_clip01_01_52_22.mp4`
+  - Placement zero-padded to 2 digits (01, 02, 03...)
+  - Time in HH_MM_SS format for easy identification
+- **Smart skip:** Skips existing files > 1MB (already processed successfully)
+- **Retry logic:** Up to 5 retries with 2-second delays for subprocess issues
+- **Sequential processing:** Ensures each clip finishes before starting next (prevents simultaneous write conflicts)
 - **Error handling:** Edge cases (beginning/end of video, missing files)
 - **User-friendly console output** with progress indicators
 - **MoviePy version compatibility:** 
   - Supports both old (subclip) and new (subclipped) API
   - Adaptive import system for different moviepy versions
-  - Simplified write_videofile parameters for compatibility
+  - Single-threaded processing to avoid subprocess race conditions
 
 ## Technical Notes (Resolved Issues)
 ### MoviePy Compatibility
@@ -84,17 +90,20 @@ Placement,Camera,Time,Side
 3. Place ALL video files in `video_files/` folder (multiple cameras allowed)
 4. Run script: `python video_clip_extractor.py`
 5. Extracted clips appear in `output/` folder with names like:
-   - `Cam1-02112026_Cam1_clip001_6742.00s.mp4`
-   - `Cam1-02112026_Cam1_clip002_8542.00s.mp4`
+   - `Cam2-02112026_clip01_01_52_22.mp4` (timestamp: 1:52:22)
+   - `Cam2-02112026_clip02_02_22_22.mp4` (timestamp: 2:22:22)
+   - Format breakdown: `{VideoName}_clip{#}_HH_MM_SS.mp4`
 
 ## Example Output
 ```
 ✓ Loaded CSV file: csv_files/timestamps.csv
   Found 5 timestamps to process
-✓ Loaded video for Cam1: Cam1-02112026.mp4
+✓ Loaded video for Cam2: Cam2-02112026.mp4
   Duration: 11085.59 seconds
-✓ Extracted clip 1/5: Cam1-02112026_Cam1_clip001_6742.00s.mp4
-  Time range: 6739.00s - 6744.00s (5.00s)
+✓ Extracted clip 1/5: Cam2-02112026_clip01_01_52_22.mp4 (1.23 MB)
+  Time range: 6739.00s - 6745.00s (6.00s)
+  Timestamp: 01:52:22
+⊘ Skipping clip 2/5: Cam2-02112026_clip02_02_22_22.mp4 (already exists, 1.45 MB)
 ...
 Extraction complete! Successful: 5, Failed: 0
 ```
@@ -126,7 +135,7 @@ After extracting clips with this tool, you can create various video formats:
 ```
 1. Extract Clips (video_clip_extractor.py)
    ├─ Input: CSV timestamps + video folder
-   └─> Output: Individual 5-second clips → output/
+   └─> Output: Individual 6-second clips → output/
    
 2A. Generate Vertical Videos (vertical_video_generator.py)
     ├─ Input: Clips from output/ folder + CSV Side data

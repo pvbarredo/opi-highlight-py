@@ -30,6 +30,7 @@ wheels/
 *.mkv
 *.flv
 *.wmv
+*.mp3
 
 # Temporary files
 *.tmp

@@ -1,10 +1,13 @@
 """
 Video Clip Extractor
 Extracts video clips based on timestamps from a CSV file.
-Each clip is extracted from (timestamp - 3 seconds) to (timestamp + 2 seconds).
+Each clip is extracted from (timestamp - 3 seconds) to (timestamp + 3 seconds).
 """
 
 import os
+import time
+import gc
+import glob
 import pandas as pd
 try:
     from moviepy.editor import VideoFileClip
@@ -117,6 +120,21 @@ class VideoClipExtractor:
         else:  # Just seconds
             return float(parts[0])
     
+    def seconds_to_hhmmss(self, seconds):
+        """
+        Convert seconds to HH_MM_SS format.
+        
+        Args:
+            seconds (float): Time in seconds
+            
+        Returns:
+            str: Formatted time as HH_MM_SS
+        """
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}_{minutes:02d}_{secs:02d}"
+    
     def extract_clips(self):
         """
         Read CSV file and extract video clips based on timestamps.
@@ -158,6 +176,7 @@ class VideoClipExtractor:
         # Extract clips
         successful_clips = 0
         failed_clips = 0
+        failed_clip_queue = []  # Track failed clips for retry
         
         print(f"\nProcessing clips...\n")
         
@@ -178,9 +197,9 @@ class VideoClipExtractor:
                 # Get timestamp and convert to seconds
                 timestamp = self.parse_timestamp(row[timestamp_col])
                 
-                # Calculate start and end times (timestamp - 3s, timestamp + 2s)
+                # Calculate start and end times (timestamp - 3s, timestamp + 3s)
                 start_time = max(0, timestamp - 3)
-                end_time = min(video_duration, timestamp + 2)
+                end_time = min(video_duration, timestamp + 3)
                 
                 # Skip if the clip would be too short
                 if end_time - start_time < 1:
@@ -194,48 +213,221 @@ class VideoClipExtractor:
                 except AttributeError:
                     clip = video.subclip(start_time, end_time)
                 
-                # Generate output filename with camera info
+                # Generate output filename with new naming convention
+                # Format: Cam2-02112026_clip01_HH_MM_SS.mp4
                 video_name = Path(video_path).stem
                 
-                # Get placement info
-                placement_info = ""
+                # Get placement/clip number
+                clip_number = ""
                 if 'Placement' in df.columns:
                     placement = row['Placement']
-                    placement_info = f"clip{placement:03d}_" if isinstance(placement, (int, float)) else f"{placement}_"
+                    clip_number = f"clip{int(placement):02d}" if isinstance(placement, (int, float)) else f"clip{idx+1:02d}"
+                else:
+                    clip_number = f"clip{idx+1:02d}"
                 
-                clip_name = f"{video_name}_{camera_name}_{placement_info}{timestamp:.2f}s.mp4"
+                # Convert timestamp to HH_MM_SS format
+                time_str = self.seconds_to_hhmmss(timestamp)
+                
+                clip_name = f"{video_name}_{clip_number}_{time_str}.mp4"
                 output_path = os.path.join(self.output_dir, clip_name)
                 
-                # Write clip to file (parameters differ between moviepy versions)
+                # Skip if file already exists and is > 1MB
+                if os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path)
+                    if file_size > 1024 * 1024:  # > 1MB
+                        print(f"⊘ Skipping clip {idx + 1}/{len(df)}: {clip_name} (already exists, {file_size / (1024*1024):.2f} MB)")
+                        successful_clips += 1
+                        clip.close()
+                        continue
+                    else:
+                        print(f"  ⚠ Replacing incomplete file: {clip_name} ({file_size / 1024:.2f} KB)")
+                
+                # Clean up temp files and force garbage collection before writing
+                temp_pattern = os.path.join(self.output_dir, "*TEMP_MPY*")
+                for temp_file in glob.glob(temp_pattern):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                gc.collect()
+                time.sleep(0.5)
+                
+                # Write clip to file with improved error handling
+                write_success = False
                 try:
-                    clip.write_videofile(
-                        output_path,
-                        codec='libx264',
-                        audio_codec='aac'
-                    )
-                except Exception as e:
-                    # Try with older parameter names
+                    # Try standard write with audio
                     clip.write_videofile(
                         output_path,
                         codec='libx264',
                         audio_codec='aac',
-                        temp_audiofile='temp-audio.m4a',
-                        remove_temp=True,
-                        verbose=False,
-                        logger=None
+                        threads=1,
+                        preset='medium',
+                        write_logfile=False  # Disable log file to reduce I/O
                     )
+                    write_success = True
+                except Exception as e:
+                    # If standard write fails, try without explicit audio codec
+                    print(f"  ⚠ First attempt failed: {e}")
+                    print(f"  ⟳ Trying alternative method...")
+                    gc.collect()
+                    time.sleep(2)
+                    try:
+                        clip.write_videofile(
+                            output_path,
+                            codec='libx264',
+                            threads=1,
+                            preset='ultrafast',  # Faster preset on retry
+                            write_logfile=False
+                        )
+                        write_success = True
+                    except Exception as e2:
+                        print(f"  ✗ Alternative method also failed: {e2}")
+                        raise
                 
-                print(f"✓ Extracted clip {idx + 1}/{len(df)}: {clip_name}")
-                print(f"  Time range: {start_time:.2f}s - {end_time:.2f}s ({end_time - start_time:.2f}s)\n")
-                
-                successful_clips += 1
-                
-                # Close the clip to free resources
+                # Close the clip and force cleanup
                 clip.close()
+                del clip
+                gc.collect()
+                
+                # Clean up any remaining temp files
+                temp_pattern = os.path.join(self.output_dir, "*TEMP_MPY*")
+                for temp_file in glob.glob(temp_pattern):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                
+                # Wait for complete subprocess cleanup
+                time.sleep(2.0)
+                
+                # Verify file was written successfully
+                if write_success and os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path)
+                    print(f"✓ Extracted clip {idx + 1}/{len(df)}: {clip_name} ({file_size / (1024*1024):.2f} MB)")
+                    print(f"  Time range: {start_time:.2f}s - {end_time:.2f}s ({end_time - start_time:.2f}s)")
+                    print(f"  Timestamp: {time_str.replace('_', ':')}\n")
+                    successful_clips += 1
+                else:
+                    print(f"✗ Failed to verify clip {idx + 1}: {clip_name}\n")
+                    failed_clips += 1
                 
             except Exception as e:
                 print(f"✗ Error extracting clip {idx + 1}: {e}")
                 failed_clips += 1
+                # Add to retry queue
+                failed_clip_queue.append((idx, row.copy()))
+        
+        # Retry failed clips
+        if failed_clip_queue:
+            print(f"\n{'='*50}")
+            print(f"⟳ Retrying {len(failed_clip_queue)} failed clip(s)...")
+            print(f"{'='*50}\n")
+            
+            import random
+            random.shuffle(failed_clip_queue)  # Randomize retry order
+            
+            retry_successful = 0
+            retry_failed = 0
+            
+            for idx, row in failed_clip_queue:
+                try:
+                    print(f"⟳ Retrying clip {idx + 1}/{len(df)}...")
+                    
+                    # Get camera name
+                    camera_name = row['Camera']
+                    
+                    # Get or load the video for this camera
+                    video, video_path = self.get_video(camera_name)
+                    if video is None:
+                        print(f"⚠ Skipping retry: No video found for {camera_name}\n")
+                        retry_failed += 1
+                        continue
+                    
+                    video_duration = video.duration
+                    
+                    # Get timestamp and convert to seconds
+                    timestamp = self.parse_timestamp(row[timestamp_col])
+                    
+                    # Calculate start and end times
+                    start_time = max(0, timestamp - 3)
+                    end_time = min(video_duration, timestamp + 3)
+                    
+                    # Extract clip
+                    try:
+                        clip = video.subclipped(start_time, end_time)
+                    except AttributeError:
+                        clip = video.subclip(start_time, end_time)
+                    
+                    # Generate filename
+                    video_name = Path(video_path).stem
+                    if 'Placement' in df.columns:
+                        placement = row['Placement']
+                        clip_number = f"clip{int(placement):02d}" if isinstance(placement, (int, float)) else f"clip{idx+1:02d}"
+                    else:
+                        clip_number = f"clip{idx+1:02d}"
+                    
+                    time_str = self.seconds_to_hhmmss(timestamp)
+                    clip_name = f"{video_name}_{clip_number}_{time_str}.mp4"
+                    output_path = os.path.join(self.output_dir, clip_name)
+                    
+                    # Clean up and wait
+                    temp_pattern = os.path.join(self.output_dir, "*TEMP_MPY*")
+                    for temp_file in glob.glob(temp_pattern):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    gc.collect()
+                    time.sleep(3.0)
+                    
+                    # Try to write
+                    write_success = False
+                    try:
+                        clip.write_videofile(
+                            output_path,
+                            codec='libx264',
+                            audio_codec='aac',
+                            threads=1,
+                            preset='medium',
+                            write_logfile=False
+                        )
+                        write_success = True
+                    except Exception as e:
+                        print(f"  ⚠ Retry attempt failed: {e}")
+                    
+                    # Cleanup
+                    clip.close()
+                    del clip
+                    gc.collect()
+                    
+                    for temp_file in glob.glob(temp_pattern):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    
+                    time.sleep(3.0)
+                    
+                    # Verify
+                    if write_success and os.path.exists(output_path):
+                        file_size = os.path.getsize(output_path)
+                        if file_size > 1024 * 1024:
+                            print(f"✓ Retry successful: {clip_name} ({file_size / (1024*1024):.2f} MB)\n")
+                            retry_successful += 1
+                            successful_clips += 1
+                            failed_clips -= 1
+                        else:
+                            print(f"✗ Retry failed: File too small\n")
+                            retry_failed += 1
+                    else:
+                        print(f"✗ Retry failed: Could not verify file\n")
+                        retry_failed += 1
+                        
+                except Exception as e:
+                    print(f"✗ Retry error: {e}\n")
+                    retry_failed += 1
+            
+            print(f"\nRetry results: {retry_successful} successful, {retry_failed} failed\n")
         
         # Close all cached videos
         for camera_name, (video, _) in self.video_cache.items():

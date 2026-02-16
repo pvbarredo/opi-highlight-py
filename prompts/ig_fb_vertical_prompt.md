@@ -40,6 +40,12 @@ Create optimized vertical videos specifically formatted for Instagram Stories, R
 
 ### Input
 - Source clips from `output/` folder (auto-discovered)
+- Clip naming format: `{VideoName}_clip{##}_HH_MM_SS.mp4`
+  - Example: `Cam2-02112026_clip01_01_52_22.mp4`
+  - Placement number zero-padded (clip01, clip02, etc.)
+  - Timestamp in HH_MM_SS format
+  - Extractor skips existing files > 1MB (already processed)
+  - 5 retry attempts with 2-second delays for reliability
 - Optional: Team branding assets (logos, colors)
 - Optional: Call-to-action graphics
 - Supports: .mp4, .avi, .mov, .mkv formats

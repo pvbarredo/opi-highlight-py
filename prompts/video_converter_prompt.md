@@ -14,6 +14,9 @@ Convert video files to the smallest possible file size while maintaining visual 
 
 ### Input
 - Source: Any video files from `video_files/` folder
+- Also works with extracted clips from `output/` folder
+  - Clip format: `{VideoName}_clip{##}_HH_MM_SS.mp4`
+  - Example: `Cam2-02112026_clip01_01_52_22.mp4`
 - Supported formats: .mp4, .avi, .mov, .mkv, .flv, .wmv
 - Auto-discovery: Automatically finds all video files in input folder
 - Batch processing: Process single file or entire folder

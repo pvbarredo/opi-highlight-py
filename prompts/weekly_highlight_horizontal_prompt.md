@@ -43,15 +43,21 @@ Create horizontal video compilations (16:9 aspect ratio) from extracted highligh
 ### How It Works
 ```
 CSV: Placement=1, Side="left"
-Clip: Cam1_clip001_6742.00s.mp4
+Clip: Cam2-02112026_clip01_01_52_22.mp4
 
 1. Calculate crop area: 1/1.15 = 86.96% of original (this creates the zoom)
 2. Read CSV: Placement 1 → Side "left"
-3. Extract "clip001" from filename → matches Placement 1
+3. Extract "clip01" from filename → matches Placement 1
 4. Trim 15% from RIGHT side of crop area (keeps left 85%)
 5. Crop directly from ORIGINAL video pixels at calculated position
 6. Scale cropped portion to standard 1920x1080 (16:9)
 7. Result: Enhanced horizontal video, better quality, focused on left action
+
+Note: Clip naming format changed to {VideoName}_clip{##}_HH_MM_SS.mp4
+- Placement number is zero-padded (clip01, clip02, etc.)
+- Timestamp in HH_MM_SS format for easy identification
+- Extractor skips existing files > 1MB to avoid re-processing
+- 5 retry attempts with 2-second delays for subprocess reliability
 ```
 
 ### Mathematical Balance
