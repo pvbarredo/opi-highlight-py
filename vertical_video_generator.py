@@ -2,9 +2,16 @@
 Vertical Video Generator
 Creates vertical format videos (9:16) from horizontal highlight clips
 for social media platforms (Instagram Reels, Stories, Facebook, TikTok)
+
+Default mode: Generates individual vertical videos for each clip
+Optional: Can compile all clips into single video compilations
 """
 
 import os
+import time
+import gc
+import glob
+import random
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -251,6 +258,245 @@ class VerticalVideoGenerator:
         
         return resized
     
+    def create_individual_verticals(self, clip_files=None):
+        """
+        Create individual vertical videos from each clip.
+        Each clip is converted to vertical format and saved separately.
+        
+        Args:
+            clip_files (list): List of clip file paths. If None, uses all clips.
+            
+        Returns:
+            list: Paths to generated vertical videos
+        """
+        print("Creating Individual Vertical Videos...")
+        print("=" * 50)
+        
+        # Get clips to process
+        if clip_files is None:
+            clip_files = self.get_clip_files()
+        
+        if not clip_files:
+            print("✗ No clips found to process")
+            return []
+        
+        print(f"✓ Found {len(clip_files)} clips to process")
+        
+        # Process each clip individually
+        output_paths = []
+        successful = 0
+        failed = 0
+        failed_clip_queue = []  # Track failed clips for retry
+        
+        for idx, clip_path in enumerate(clip_files):
+            try:
+                clip_filename = os.path.basename(clip_path)
+                clip_name = Path(clip_filename).stem
+                print(f"\nProcessing clip {idx + 1}/{len(clip_files)}: {clip_filename}")
+                
+                # Generate output filename
+                output_name = f"{clip_name}_vertical.mp4"
+                output_path = os.path.join(self.output_dir, output_name)
+                
+                # Skip if file already exists and is > 1MB
+                if os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path)
+                    if file_size > 1024 * 1024:  # > 1MB
+                        print(f"⊘ Skipping: {output_name} (already exists, {file_size / (1024*1024):.2f} MB)")
+                        output_paths.append(output_path)
+                        successful += 1
+                        continue
+                    else:
+                        print(f"  ⚠ Replacing incomplete file: {output_name} ({file_size / 1024:.2f} KB)")
+                
+                # Get side preference for this clip
+                side = self._get_side_for_clip(clip_filename)
+                
+                # Clean up temp files and force garbage collection before processing
+                temp_pattern = os.path.join(self.output_dir, "*TEMP_MPY*")
+                for temp_file in glob.glob(temp_pattern):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                gc.collect()
+                time.sleep(3.0)  # Wait before processing
+                
+                # Load clip
+                clip = VideoFileClip(clip_path)
+                
+                # Convert to vertical
+                vertical_clip = self.crop_to_vertical(clip, side=side)
+                mode = "Letterbox" if self.config['letterbox_mode'] else "Fill"
+                print(f"  ✓ Converted to vertical ({self.config['resolution'][0]}x{self.config['resolution'][1]}) - Mode: {mode}, Side: {side}")
+                
+                # Write video file with error handling
+                write_success = False
+                try:
+                    print(f"  Writing: {output_name}")
+                    vertical_clip.write_videofile(
+                        output_path,
+                        codec='libx264',
+                        audio_codec='aac',
+                        fps=self.config['fps'],
+                        threads=1,
+                        preset='medium',
+                        write_logfile=False
+                    )
+                    write_success = True
+                except Exception as e:
+                    # Try alternative method
+                    print(f"  ⚠ First attempt failed: {e}")
+                    print(f"  ⟳ Trying alternative method...")
+                    gc.collect()
+                    time.sleep(2)
+                    try:
+                        vertical_clip.write_videofile(
+                            output_path,
+                            codec='libx264',
+                            threads=1,
+                            preset='ultrafast',
+                            write_logfile=False
+                        )
+                        write_success = True
+                    except Exception as e2:
+                        print(f"  ✗ Alternative method also failed: {e2}")
+                        raise
+                
+                # Close and cleanup
+                vertical_clip.close()
+                clip.close()
+                del vertical_clip
+                del clip
+                gc.collect()
+                
+                # Clean up any remaining temp files
+                for temp_file in glob.glob(temp_pattern):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                
+                # Wait for complete subprocess cleanup
+                time.sleep(3.0)
+                
+                # Verify file was written successfully
+                if write_success and os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path)
+                    print(f"  ✓ Saved: {output_name} ({file_size / (1024*1024):.2f} MB)")
+                    output_paths.append(output_path)
+                    successful += 1
+                else:
+                    print(f"  ✗ Failed to verify: {output_name}")
+                    failed += 1
+                    failed_clip_queue.append(clip_path)
+                
+            except Exception as e:
+                print(f"  ✗ Error processing clip: {e}")
+                failed += 1
+                failed_clip_queue.append(clip_path)
+        
+        # Retry failed clips
+        if failed_clip_queue:
+            print(f"\n{'='*50}")
+            print(f"⟳ Retrying {len(failed_clip_queue)} failed clip(s)...")
+            print(f"{'='*50}\n")
+            
+            random.shuffle(failed_clip_queue)  # Randomize retry order
+            
+            retry_successful = 0
+            retry_failed = 0
+            
+            for clip_path in failed_clip_queue:
+                try:
+                    clip_filename = os.path.basename(clip_path)
+                    clip_name = Path(clip_filename).stem
+                    print(f"⟳ Retrying: {clip_filename}")
+                    
+                    # Generate output filename
+                    output_name = f"{clip_name}_vertical.mp4"
+                    output_path = os.path.join(self.output_dir, output_name)
+                    
+                    # Get side preference
+                    side = self._get_side_for_clip(clip_filename)
+                    
+                    # Clean up and wait
+                    temp_pattern = os.path.join(self.output_dir, "*TEMP_MPY*")
+                    for temp_file in glob.glob(temp_pattern):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    gc.collect()
+                    time.sleep(3.0)
+                    
+                    # Load and convert
+                    clip = VideoFileClip(clip_path)
+                    vertical_clip = self.crop_to_vertical(clip, side=side)
+                    
+                    # Try to write
+                    write_success = False
+                    try:
+                        vertical_clip.write_videofile(
+                            output_path,
+                            codec='libx264',
+                            audio_codec='aac',
+                            fps=self.config['fps'],
+                            threads=1,
+                            preset='medium',
+                            write_logfile=False
+                        )
+                        write_success = True
+                    except Exception as e:
+                        print(f"  ⚠ Retry attempt failed: {e}")
+                    
+                    # Cleanup
+                    vertical_clip.close()
+                    clip.close()
+                    del vertical_clip
+                    del clip
+                    gc.collect()
+                    
+                    for temp_file in glob.glob(temp_pattern):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    
+                    time.sleep(3.0)
+                    
+                    # Verify
+                    if write_success and os.path.exists(output_path):
+                        file_size = os.path.getsize(output_path)
+                        if file_size > 1024 * 1024:
+                            print(f"✓ Retry successful: {output_name} ({file_size / (1024*1024):.2f} MB)\n")
+                            retry_successful += 1
+                            output_paths.append(output_path)
+                            successful += 1
+                            failed -= 1
+                        else:
+                            print(f"✗ Retry failed: File too small\n")
+                            retry_failed += 1
+                    else:
+                        print(f"✗ Retry failed: Could not verify file\n")
+                        retry_failed += 1
+                        
+                except Exception as e:
+                    print(f"✗ Retry error: {e}\n")
+                    retry_failed += 1
+            
+            print(f"\nRetry results: {retry_successful} successful, {retry_failed} failed\n")
+        
+        # Summary
+        print(f"\n{'='*50}")
+        print(f"Processing complete!")
+        print(f"  Successful: {successful}")
+        print(f"  Failed: {failed}")
+        print(f"  Output directory: {self.output_dir}")
+        print(f"{'='*50}")
+        
+        return output_paths
+    
     def create_weekly_highlight(self, clip_files=None, output_name=None):
         """
         Create a weekly highlight vertical video from clips.
@@ -440,15 +686,17 @@ def main():
     print(f"Source folder: {generator.clips_folder}")
     print(f"Output folder: {generator.output_dir}")
     
-    # Example: Create weekly highlight
-    print("\n1. Creating Weekly Highlight Vertical Video...")
-    generator.create_weekly_highlight()
+    # Create individual vertical videos for each clip
+    print("\nCreating Individual Vertical Videos...")
+    generator.create_individual_verticals()
     
-    # Example: Create Instagram Reel
+    # OPTIONAL: Uncomment to create compiled videos instead
+    # print("\n1. Creating Weekly Highlight Vertical Video...")
+    # generator.create_weekly_highlight()
+    
     # print("\n2. Creating Instagram Reel...")
     # generator.create_ig_fb_vertical(platform='instagram_reels')
     
-    # Example: Create Instagram Stories (will split if needed)
     # print("\n3. Creating Instagram Stories...")
     # generator.create_ig_fb_vertical(platform='instagram_stories')
 

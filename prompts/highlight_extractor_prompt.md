@@ -117,6 +117,8 @@ After extracting clips with this tool, you can create various video formats:
    - 9:16 vertical format (Instagram, TikTok, Reels)
    - 10% zoom with letterbox mode
    - Black bars for text/graphics
+   - Individual vertical videos for each clip (default)
+   - Optional: Compile into single video
    - Run: `python vertical_video_generator.py`
 
 2. **[Weekly Highlight Horizontal](weekly_highlight_horizontal_prompt.md)** - YouTube/Streaming
@@ -135,17 +137,26 @@ After extracting clips with this tool, you can create various video formats:
 ```
 1. Extract Clips (video_clip_extractor.py)
    ├─ Input: CSV timestamps + video folder
+   ├─ Features: Skip existing >1MB, retry failed, progress tracking
    └─> Output: Individual 6-second clips → output/
+       └─> Cam2-02112026_clip01_00_04_34.mp4 (6s each)
    
-2A. Generate Vertical Videos (vertical_video_generator.py)
+2A. Generate Individual Vertical Videos (vertical_video_generator.py) [DEFAULT]
     ├─ Input: Clips from output/ folder + CSV Side data
     ├─ Process: 10% zoom, 30% trim, letterbox mode
-    └─> Output: Vertical videos → vertical_output/
+    ├─ Features: Skip existing >1MB, retry failed, progress tracking
+    └─> Output: Individual vertical videos → vertical_output/
+        └─> Cam2-02112026_clip01_00_04_34_vertical.mp4 (9:16, each clip)
+    
+2B. Generate Vertical Compilations (vertical_video_generator.py) [OPTIONAL]
+    ├─ Input: Individual vertical videos from vertical_output/
+    ├─ Process: Combine with transitions
+    └─> Output: Compiled videos → vertical_output/
         ├─> Weekly_Highlight_2026-02-14.mp4 (9:16)
         ├─> instagram_reels_20260214.mp4 (90s max)
         └─> instagram_stories_Part1_20260214.mp4 (auto-split)
 
-2B. Generate Horizontal Videos (horizontal_video_generator.py)
+2C. Generate Horizontal Videos (horizontal_video_generator.py)
     ├─ Input: Clips from output/ folder + CSV Side data
     ├─ Process: 15% zoom, 15% trim, standard 16:9
     └─> Output: Horizontal videos → horizontal_output/
@@ -185,7 +196,9 @@ video_files/
 4. Extracted clips appear in `output/` folder
 
 ## Future Enhancements (Ideas)
-- [ ] Allow custom time offsets (not just -3s/+2s)
+- [ ] Allow custom time offsets (not just -3s/+3s)
+- [x] Skip already processed clips (files > 1MB)
+- [x] Retry logic for failed clips (5 attempts with delays)
 - [ ] Merge all clips into a single highlights video
 - [ ] Add text overlays with descriptions from CSV
 - [ ] Support for multiple video matches per camera (user selection)
