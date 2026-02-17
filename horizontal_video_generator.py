@@ -34,6 +34,7 @@ class HorizontalVideoGenerator:
         self.output_dir = output_dir
         self.csv_path = csv_path
         self.side_mapping = {}  # Maps clip names to side preference
+        self.clip_data = {}  # Maps placement number to full clip data (camera, timestamp, side)
         self.gpu_available = self._check_gpu_availability()
         self.ffmpeg_path = self._get_ffmpeg_path()
         
@@ -104,8 +105,8 @@ class HorizontalVideoGenerator:
     
     def _load_side_info(self):
         """
-        Load side information from CSV file to determine trimming positioning.
-        Maps clip placement numbers to their side preference (left/right).
+        Load clip information from CSV file including camera, timestamp, and side.
+        Maps clip placement numbers to their data for overlay display.
         """
         try:
             # Read CSV (skip date header row)
@@ -113,18 +114,33 @@ class HorizontalVideoGenerator:
             if 'Date' in df.columns and len(df.columns) > 3:
                 df = pd.read_csv(self.csv_path, skiprows=1)
             
-            # Create mapping of placement to side
-            if 'Placement' in df.columns and 'Side' in df.columns:
+            # Find timestamp column
+            timestamp_col = None
+            for col in ['timestamp', 'time', 'Time', 'Timestamp']:
+                if col in df.columns:
+                    timestamp_col = col
+                    break
+            
+            # Create mappings of placement to side and full data
+            if 'Placement' in df.columns and 'Camera' in df.columns and timestamp_col:
                 for _, row in df.iterrows():
                     placement = row['Placement']
-                    side = str(row['Side']).lower().strip()
+                    side = str(row['Side']).lower().strip() if 'Side' in df.columns and pd.notna(row['Side']) else 'center'
+                    camera = str(row['Camera']).strip() if pd.notna(row['Camera']) else 'Unknown'
+                    timestamp = str(row[timestamp_col]).strip() if pd.notna(row[timestamp_col]) else '00:00:00'
+                    
                     self.side_mapping[placement] = side
-                print(f"✓ Loaded side preferences for {len(self.side_mapping)} clips")
+                    self.clip_data[placement] = {
+                        'camera': camera,
+                        'timestamp': timestamp,
+                        'side': side
+                    }
+                print(f"✓ Loaded clip data for {len(self.clip_data)} clips")
             else:
-                print("⚠ CSV missing Placement or Side columns, using center framing")
+                print("⚠ CSV missing required columns (Placement, Camera, or timestamp)")
         except Exception as e:
-            print(f"⚠ Could not load CSV side info: {e}")
-            print("  Using center framing for all clips")
+            print(f"⚠ Could not load CSV clip data: {e}")
+            print("  Clips will be processed without overlay data")
     
     def _get_side_for_clip(self, clip_filename):
         """
@@ -309,14 +325,54 @@ class HorizontalVideoGenerator:
                 side
             )
             
-            print(f"Processing clip {idx + 1}/{len(clip_files)}: {clip_filename}")
-            print(f"  Side: {side}, Crop: {crop_params['crop_w']}x{crop_params['crop_h']}")
+            # Extract clip number from filename to lookup CSV data
+            # Format: Cam1-02112026_clip01_00_29_11.mp4
+            clip_num_match = re.search(r'clip(\d+)', clip_filename, re.IGNORECASE)
+            placement = int(clip_num_match.group(1)) if clip_num_match else (idx + 1)
             
-            # Create filter for this clip: crop -> scale
+            # Get camera and timestamp from CSV data
+            camera = "Unknown"
+            timestamp = "00:00:00"
+            
+            if placement in self.clip_data:
+                camera = self.clip_data[placement]['camera']
+                timestamp = self.clip_data[placement]['timestamp']
+                
+                # Convert timestamp to HH:MM:SS if needed
+                if ':' not in timestamp:
+                    # Assume it's in seconds
+                    try:
+                        secs = float(timestamp)
+                        hours = int(secs // 3600)
+                        minutes = int((secs % 3600) // 60)
+                        seconds = int(secs % 60)
+                        timestamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    except:
+                        pass
+            
+            # Escape special characters for FFmpeg drawtext
+            # Single backslash for escaping colons in the filter file
+            camera_escaped = camera.replace(':', '\\:')
+            timestamp_escaped = timestamp.replace(':', '\\:')
+            overlay_text = f"Cam\\: {camera_escaped} | Time\\: {timestamp_escaped}"
+            
+            print(f"Processing clip {idx + 1}/{len(clip_files)}: {clip_filename}")
+            print(f"  Side: {side}, Crop: {crop_params['crop_w']}x{crop_params['crop_h']}, Overlay: {camera} @ {timestamp}")
+            
+            # Create filter for this clip: crop -> scale -> overlay
+            # Note: Using forward slashes for Windows paths works in FFmpeg
             filter_parts.append(
                 f"[{idx}:v]crop={crop_params['crop_w']}:{crop_params['crop_h']}:"
                 f"{crop_params['crop_x']}:{crop_params['crop_y']},"
-                f"scale={target_width}:{target_height}[v{idx}]"
+                f"scale={target_width}:{target_height},"
+                f"drawtext=text='{overlay_text}'"
+                f":fontfile=C\\\\:/Windows/Fonts/arial.ttf"
+                f":fontsize=20"
+                f":fontcolor=white"
+                f":borderw=2"
+                f":bordercolor=black@0.8"
+                f":x=20"
+                f":y=20[v{idx}]"
             )
         
         # Concatenate all processed clips
@@ -330,6 +386,11 @@ class HorizontalVideoGenerator:
         filter_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
         filter_file.write(filter_complex)
         filter_file.close()
+        
+        print(f"\n✓ Filter file created: {filter_file.name}")
+        # Debug: Show first filter for verification
+        if filter_parts:
+            print(f"  Sample filter: {filter_parts[0][:150]}...")
         
         cmd.extend(['-filter_complex_script', filter_file.name])
         cmd.extend(['-map', '[outv]', '-map', '[outa]'])
@@ -385,9 +446,14 @@ class HorizontalVideoGenerator:
             # Track progress with tqdm-style display
             start_time = time.time()
             last_time_sec = 0
+            error_lines = []  # Capture error messages
             
             for line in process.stdout:
                 line = line.strip()
+                # Save error lines for debugging
+                if 'error' in line.lower() or 'invalid' in line.lower() or 'failed' in line.lower():
+                    error_lines.append(line)
+                
                 # Parse FFmpeg output for time
                 if 'time=' in line:
                     time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})', line)
@@ -435,7 +501,6 @@ class HorizontalVideoGenerator:
             # Clear progress line and show completion
             print(f"\rProgress: 100%|{'█'*50}| Completed!{' '*50}")
             print(f"━" * 50)
-            print(f"━" * 50)
             
             if result_code == 0:
                 file_size = os.path.getsize(output_path) / (1024 * 1024)
@@ -450,6 +515,16 @@ class HorizontalVideoGenerator:
                 return output_path
             else:
                 print(f"✗ FFmpeg encoding failed with code {result_code}")
+                
+                # Show error messages if captured
+                if error_lines:
+                    print(f"\n⚠ FFmpeg errors:")
+                    for err_line in error_lines[-10:]:  # Show last 10 error lines
+                        print(f"  {err_line}")
+                    
+                    # Also print the filter file for debugging
+                    print(f"\n⚠ Filter file location: {filter_file.name}")
+                    print(f"  You can inspect it to debug the filter syntax")
                 
                 # Try CPU fallback if GPU failed
                 if self.gpu_available:
