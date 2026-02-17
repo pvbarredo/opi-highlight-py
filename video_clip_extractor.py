@@ -340,7 +340,6 @@ class VideoClipExtractor:
                     except:
                         pass
                 gc.collect()
-                time.sleep(0.5)
                 
                 # Get overlay parameters for GPU-accelerated text rendering
                 overlay_params = self.get_overlay_ffmpeg_params(
@@ -399,7 +398,6 @@ class VideoClipExtractor:
                     print(f"  ⚠ First attempt failed: {e}")
                     print(f"  ⟳ Trying CPU encoding fallback...")
                     gc.collect()
-                    time.sleep(2)
                     try:
                         # Fallback without overlay if needed
                         clip.write_videofile(
@@ -426,9 +424,6 @@ class VideoClipExtractor:
                         os.remove(temp_file)
                     except:
                         pass
-                
-                # Wait for complete subprocess cleanup
-                time.sleep(2.0)
                 
                 # Verify file was written successfully
                 if write_success and os.path.exists(output_path):
@@ -515,7 +510,7 @@ class VideoClipExtractor:
                         except:
                             pass
                     gc.collect()
-                    time.sleep(3.0)
+
                     
                     # Get overlay parameters for GPU-accelerated text rendering
                     overlay_params = self.get_overlay_ffmpeg_params(
@@ -581,8 +576,6 @@ class VideoClipExtractor:
                             os.remove(temp_file)
                         except:
                             pass
-                    
-                    time.sleep(3.0)
                     
                     # Verify
                     if write_success and os.path.exists(output_path):
@@ -672,16 +665,5 @@ def main():
     extractor = VideoClipExtractor(csv_file, video_folder, output_folder)
     extractor.extract_clips()
     
-    # Optional: Create vertical videos after extraction
-    print("\n" + "=" * 50)
-    print("Clips extracted successfully!")
-    print("\nNext steps:")
-    print("  1. Review clips in 'output/' folder")
-    print("  2. Create vertical videos: python vertical_video_generator.py")
-    print("     - Weekly highlights compilation")
-    print("     - Instagram/Facebook ready formats")
-    print("=" * 50)
-
-
 if __name__ == "__main__":
     main()

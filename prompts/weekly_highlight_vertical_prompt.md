@@ -31,7 +31,7 @@ Create individual vertical format videos (9:16 aspect ratio) from extracted high
 - **Processing:** Each clip converted individually and saved separately
 - **Smart Skip:** Skips existing files > 1MB (already processed successfully)
 - **Retry Logic:** Failed clips retried after main processing with randomized order
-- **Sequential Processing:** 3-second waits before/after each clip for subprocess stability
+- **Optimized Processing:** Removed sleep() delays for faster performance
 
 ## Video Processing Requirements
 
@@ -73,7 +73,7 @@ Note: Clip naming format changed to {VideoName}_clip{##}_HH_MM_SS.mp4
 - Extractor skips existing files > 1MB to avoid re-processing
 - Vertical generator also skips existing files > 1MB
 - Both use retry logic for subprocess reliability
-- 3-second waits before/after processing ensure stability
+- Optimized performance: Sleep delays removed
 ```
 
 ### Processing Features
@@ -129,7 +129,8 @@ For creating combined videos, uncomment compilation methods in main():
 - **FPS:** 30fps
 - **Skip Existing:** Files > 1MB are skipped (already processed)
 - **Retry Logic:** Failed clips retried with randomized order
-- **Resource Management:** Garbage collection, temp file cleanup, 3s waits
+- **Resource Management:** Garbage collection, temp file cleanup
+- **Performance:** Removed sleep() delays for faster processing
 
 ## Configuration Options
 ```python

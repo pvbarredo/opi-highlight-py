@@ -66,6 +66,14 @@ Placement,Camera,Time,Side
   - If no GPU: Automatically falls back to CPU `libx264` codec
   - Works on any PC - no configuration needed
   - CPU fallback: 4 threads, veryfast preset for optimal performance
+- **GPU-Accelerated Text Overlays:** Uses FFmpeg's `drawtext` filter for camera/timestamp overlays
+  - Rendered during encoding (no additional processing time)
+  - Overlay format: "Cam: {camera} | Time: {timestamp}" displayed in top-left corner
+  - Font: Arial (Windows system font at C:/Windows/Fonts/arial.ttf)
+  - Styling: White text (fontsize=30) with black shadow for readability
+  - Implementation: `get_overlay_ffmpeg_params()` returns FFmpeg parameters for text overlay
+  - Special handling: Colons in timestamps escaped (`\:`) for FFmpeg filter compatibility
+  - Architecture change: Replaced CPU-intensive MoviePy `TextClip`/`CompositeVideoClip` with GPU filter
 - **Auto-skips date header row** in CSV
 - **Detects "Time" column** automatically (supports: Time, time, Timestamp, timestamp)
 - **Dynamic video loading:** Matches camera names to files in folder
@@ -75,7 +83,8 @@ Placement,Camera,Time,Side
   - Placement zero-padded to 2 digits (01, 02, 03...)
   - Time in HH_MM_SS format for easy identification
 - **Smart skip:** Skips existing files > 1MB (already processed successfully)
-- **Retry logic:** Up to 5 retries with 2-second delays for subprocess issues
+- **Retry logic:** Up to 5 retries for subprocess issues
+- **Optimized performance:** Removed sleep() delays between operations for faster processing
 - **Sequential processing:** Ensures each clip finishes before starting next (prevents simultaneous write conflicts)
 - **Error handling:** Edge cases (beginning/end of video, missing files)
 - **User-friendly console output** with progress indicators
