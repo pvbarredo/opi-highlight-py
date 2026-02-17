@@ -8,6 +8,7 @@ import os
 import time
 import gc
 import glob
+import subprocess
 import pandas as pd
 try:
     from moviepy.editor import VideoFileClip
@@ -30,9 +31,35 @@ class VideoClipExtractor:
         self.video_folder = video_folder
         self.output_dir = output_dir
         self.video_cache = {}  # Cache loaded videos
+        self.gpu_available = self._check_gpu_availability()
         
         # Create output directory if it doesn't exist
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+    
+    def _check_gpu_availability(self):
+        """
+        Check if NVIDIA GPU (NVENC) is available for hardware encoding.
+        
+        Returns:
+            bool: True if GPU encoding is available, False otherwise
+        """
+        try:
+            # Check if ffmpeg supports h264_nvenc codec
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if 'h264_nvenc' in result.stdout:
+                print("✓ NVIDIA GPU detected - Hardware encoding enabled")
+                return True
+            else:
+                print("⚠ No NVIDIA GPU detected - Using CPU encoding")
+                return False
+        except Exception:
+            print("⚠ Could not detect GPU - Using CPU encoding")
+            return False
     
     def find_video_file(self, camera_name):
         """
@@ -252,36 +279,48 @@ class VideoClipExtractor:
                 gc.collect()
                 time.sleep(0.5)
                 
-                # Write clip to file with improved error handling
+                # Write clip to file with GPU/CPU selection
                 write_success = False
                 try:
-                    # Try standard write with audio
-                    clip.write_videofile(
-                        output_path,
-                        codec='libx264',
-                        audio_codec='aac',
-                        threads=1,
-                        preset='medium',
-                        write_logfile=False  # Disable log file to reduce I/O
-                    )
+                    if self.gpu_available:
+                        # Try GPU encoding first
+                        clip.write_videofile(
+                            output_path,
+                            codec='h264_nvenc',
+                            audio_codec='aac',
+                            bitrate='15M',
+                            preset='p4',
+                            write_logfile=False,
+                            ffmpeg_params=['-gpu', '0', '-rc', 'vbr', '-cq', '23']
+                        )
+                    else:
+                        # Use CPU encoding
+                        clip.write_videofile(
+                            output_path,
+                            codec='libx264',
+                            audio_codec='aac',
+                            threads=4,
+                            preset='veryfast',
+                            write_logfile=False
+                        )
                     write_success = True
                 except Exception as e:
-                    # If standard write fails, try without explicit audio codec
+                    # Fallback to CPU if GPU fails
                     print(f"  ⚠ First attempt failed: {e}")
-                    print(f"  ⟳ Trying alternative method...")
+                    print(f"  ⟳ Trying CPU encoding fallback...")
                     gc.collect()
                     time.sleep(2)
                     try:
                         clip.write_videofile(
                             output_path,
                             codec='libx264',
-                            threads=1,
-                            preset='ultrafast',  # Faster preset on retry
+                            threads=4,
+                            preset='ultrafast',
                             write_logfile=False
                         )
                         write_success = True
                     except Exception as e2:
-                        print(f"  ✗ Alternative method also failed: {e2}")
+                        print(f"  ✗ Fallback also failed: {e2}")
                         raise
                 
                 # Close the clip and force cleanup
@@ -380,17 +419,28 @@ class VideoClipExtractor:
                     gc.collect()
                     time.sleep(3.0)
                     
-                    # Try to write
+                    # Try to write (retry attempt)
                     write_success = False
                     try:
-                        clip.write_videofile(
-                            output_path,
-                            codec='libx264',
-                            audio_codec='aac',
-                            threads=1,
-                            preset='medium',
-                            write_logfile=False
-                        )
+                        if self.gpu_available:
+                            clip.write_videofile(
+                                output_path,
+                                codec='h264_nvenc',
+                                audio_codec='aac',
+                                bitrate='15M',
+                                preset='p4',
+                                write_logfile=False,
+                                ffmpeg_params=['-gpu', '0', '-rc', 'vbr', '-cq', '23']
+                            )
+                        else:
+                            clip.write_videofile(
+                                output_path,
+                                codec='libx264',
+                                audio_codec='aac',
+                                threads=4,
+                                preset='veryfast',
+                                write_logfile=False
+                            )
                         write_success = True
                     except Exception as e:
                         print(f"  ⚠ Retry attempt failed: {e}")

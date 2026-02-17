@@ -78,6 +78,11 @@ Note: Clip naming format changed to {VideoName}_clip{##}_HH_MM_SS.mp4
 
 ### Processing Features
 - **Individual Conversion:** Each clip processed and saved separately
+- **GPU Acceleration:** Automatic NVIDIA GPU detection (NVENC)
+  - GPU Available: Uses `h264_nvenc` codec (10-20x faster)
+  - No GPU: Automatically falls back to CPU `libx264` codec  
+  - Works on any PC - adapts to available hardware
+  - GPU: 60-120 fps encoding | CPU: 5-15 fps encoding
 - **Progress Tracking:** Shows current clip being processed (e.g., "Processing clip 5/44")
 - **Skip Existing:** Automatically skips files > 1MB that already exist
 - **Retry Failed Clips:** Tracks failed clips and retries after main processing

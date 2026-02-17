@@ -79,6 +79,19 @@ HORIZONTAL_CONFIG = {
 }
 ```
 
+### GPU Acceleration
+- **Automatic Detection:** Detects NVIDIA GPU (NVENC) on startup
+- **GPU Available:** Uses `h264_nvenc` codec (10-20x faster than CPU)
+  - Preset: `p4` (balanced quality/speed)
+  - Quality: `cq=23` (high quality)
+  - Bitrate: 20M with VBR (variable bitrate)
+  - Speed: 60-120 fps typical encoding speed
+- **No GPU / Fallback:** Uses CPU `libx264` codec
+  - Threads: 8 (multi-core CPU utilization)
+  - Preset: `veryfast` (optimized for speed)
+  - Speed: 5-15 fps typical encoding speed
+- **Portability:** Works on any PC - automatically adapts to available hardware
+
 ### Adjustable Parameters
 - **zoom_factor:** 1.0 (no zoom) to 1.3 (30% zoom) - Default: 1.15 (15% zoom)
 - **opposite_side_trim:** 0.0 (keep full width) to 0.3 (trim 30%) - Default: 0.15 (15%)

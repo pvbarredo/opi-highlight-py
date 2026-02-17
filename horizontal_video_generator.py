@@ -5,6 +5,7 @@ with smart zooming and side-based trimming for YouTube, streaming platforms
 """
 
 import os
+import subprocess
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -29,6 +30,7 @@ class HorizontalVideoGenerator:
         self.output_dir = output_dir
         self.csv_path = csv_path
         self.side_mapping = {}  # Maps clip names to side preference
+        self.gpu_available = self._check_gpu_availability()
         
         # Load side information from CSV
         self._load_side_info()
@@ -45,6 +47,30 @@ class HorizontalVideoGenerator:
             'transition_duration': 0.5,
             'fps': 30,
         }
+    
+    def _check_gpu_availability(self):
+        """
+        Check if NVIDIA GPU (NVENC) is available for hardware encoding.
+        
+        Returns:
+            bool: True if GPU encoding is available, False otherwise
+        """
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if 'h264_nvenc' in result.stdout:
+                print("✓ NVIDIA GPU detected - Hardware encoding enabled")
+                return True
+            else:
+                print("⚠ No NVIDIA GPU detected - Using CPU encoding")
+                return False
+        except Exception:
+            print("⚠ Could not detect GPU - Using CPU encoding")
+            return False
     
     def _load_side_info(self):
         """
@@ -241,24 +267,65 @@ class HorizontalVideoGenerator:
         
         output_path = os.path.join(self.output_dir, output_name)
         
-        # Write video file
+        # Write video file with GPU/CPU auto-detection
         print(f"\nWriting video to: {output_path}")
+        encoder_type = "NVIDIA GPU (NVENC)" if self.gpu_available else "CPU (x264)"
+        print(f"Using {encoder_type} encoding...")
         try:
-            final_clip.write_videofile(
-                output_path,
-                codec='libx264',
-                audio_codec='aac',
-                fps=self.config['fps']
-            )
+            if self.gpu_available:
+                # GPU encoding
+                final_clip.write_videofile(
+                    output_path,
+                    codec='h264_nvenc',
+                    audio_codec='aac',
+                    fps=self.config['fps'],
+                    bitrate='20M',
+                    preset='p4',
+                    ffmpeg_params=[
+                        '-gpu', '0',
+                        '-rc', 'vbr',
+                        '-cq', '23',
+                        '-b:v', '20M',
+                        '-maxrate', '40M',
+                        '-bufsize', '80M',
+                    ]
+                )
+            else:
+                # CPU encoding
+                final_clip.write_videofile(
+                    output_path,
+                    codec='libx264',
+                    audio_codec='aac',
+                    fps=self.config['fps'],
+                    threads=8,
+                    preset='veryfast'
+                )
             print(f"✓ Video created successfully!")
             print(f"  Resolution: {self.config['resolution'][0]}x{self.config['resolution'][1]}")
             print(f"  Duration: {final_clip.duration:.2f}s")
             print(f"  Zoom: {int((self.config['zoom_factor'] - 1) * 100)}%")
             print(f"  Trim: {int(self.config['opposite_side_trim'] * 100)}% from opposite side")
+            print(f"  Encoder: {encoder_type}")
             print(f"  Location: {output_path}")
         except Exception as e:
             print(f"✗ Error writing video: {e}")
-            return None
+            if self.gpu_available:
+                print("  Retrying with CPU encoding...")
+                try:
+                    final_clip.write_videofile(
+                        output_path,
+                        codec='libx264',
+                        audio_codec='aac',
+                        fps=self.config['fps'],
+                        threads=8,
+                        preset='veryfast'
+                    )
+                    print(f"✓ Video created with CPU fallback")
+                except Exception as e2:
+                    print(f"✗ CPU fallback also failed: {e2}")
+                    return None
+            else:
+                return None
         finally:
             # Clean up
             final_clip.close()

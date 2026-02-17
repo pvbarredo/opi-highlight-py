@@ -61,6 +61,11 @@ Placement,Camera,Time,Side
 ## Implementation Details
 - **Video Processing:** Using `moviepy` library (v2.1.2+)
 - **CSV Handling:** Using `pandas` library
+- **GPU Acceleration:** Automatic NVIDIA GPU detection (NVENC)
+  - If GPU available: Uses `h264_nvenc` codec (10-20x faster)
+  - If no GPU: Automatically falls back to CPU `libx264` codec
+  - Works on any PC - no configuration needed
+  - CPU fallback: 4 threads, veryfast preset for optimal performance
 - **Auto-skips date header row** in CSV
 - **Detects "Time" column** automatically (supports: Time, time, Timestamp, timestamp)
 - **Dynamic video loading:** Matches camera names to files in folder
@@ -96,6 +101,7 @@ Placement,Camera,Time,Side
 
 ## Example Output
 ```
+✓ NVIDIA GPU detected - Hardware encoding enabled
 ✓ Loaded CSV file: csv_files/timestamps.csv
   Found 5 timestamps to process
 ✓ Loaded video for Cam2: Cam2-02112026.mp4
@@ -106,6 +112,8 @@ Placement,Camera,Time,Side
 ⊘ Skipping clip 2/5: Cam2-02112026_clip02_02_22_22.mp4 (already exists, 1.45 MB)
 ...
 Extraction complete! Successful: 5, Failed: 0
+
+Note: GPU encoding typically processes at 60-120 fps vs 5-10 fps on CPU
 ```
 
 ## Related Prompts & Workflows

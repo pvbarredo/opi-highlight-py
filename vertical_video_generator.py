@@ -12,6 +12,7 @@ import time
 import gc
 import glob
 import random
+import subprocess
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -35,6 +36,7 @@ class VerticalVideoGenerator:
         self.output_dir = output_dir
         self.csv_path = csv_path
         self.side_mapping = {}  # Maps clip names to side preference
+        self.gpu_available = self._check_gpu_availability()
         
         # Load side information from CSV
         self._load_side_info()
@@ -53,6 +55,30 @@ class VerticalVideoGenerator:
             'opposite_side_trim': 0.30,  # Trim 30% from opposite side when letterboxing
             'zoom_factor': 1.10,  # Zoom in by 10% (1.10 = 110% of original size)
         }
+    
+    def _check_gpu_availability(self):
+        """
+        Check if NVIDIA GPU (NVENC) is available for hardware encoding.
+        
+        Returns:
+            bool: True if GPU encoding is available, False otherwise
+        """
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if 'h264_nvenc' in result.stdout:
+                print("✓ NVIDIA GPU detected - Hardware encoding enabled")
+                return True
+            else:
+                print("⚠ No NVIDIA GPU detected - Using CPU encoding")
+                return False
+        except Exception:
+            print("⚠ Could not detect GPU - Using CPU encoding")
+            return False
     
     def _load_side_info(self):
         """
@@ -330,32 +356,52 @@ class VerticalVideoGenerator:
                 mode = "Letterbox" if self.config['letterbox_mode'] else "Fill"
                 print(f"  ✓ Converted to vertical ({self.config['resolution'][0]}x{self.config['resolution'][1]}) - Mode: {mode}, Side: {side}")
                 
-                # Write video file with error handling
+                # Write video file with GPU/CPU selection
                 write_success = False
+                encoder_type = "GPU" if self.gpu_available else "CPU"
                 try:
-                    print(f"  Writing: {output_name}")
-                    vertical_clip.write_videofile(
-                        output_path,
-                        codec='libx264',
-                        audio_codec='aac',
-                        fps=self.config['fps'],
-                        threads=1,
-                        preset='medium',
-                        write_logfile=False
-                    )
+                    print(f"  Writing with {encoder_type}: {output_name}")
+                    if self.gpu_available:
+                        vertical_clip.write_videofile(
+                            output_path,
+                            codec='h264_nvenc',
+                            audio_codec='aac',
+                            fps=self.config['fps'],
+                            bitrate='15M',
+                            preset='p4',
+                            write_logfile=False,
+                            ffmpeg_params=[
+                                '-gpu', '0',
+                                '-rc', 'vbr',
+                                '-cq', '23',
+                                '-b:v', '15M',
+                                '-maxrate', '30M',
+                                '-bufsize', '60M',
+                            ]
+                        )
+                    else:
+                        vertical_clip.write_videofile(
+                            output_path,
+                            codec='libx264',
+                            audio_codec='aac',
+                            fps=self.config['fps'],
+                            threads=4,
+                            preset='veryfast',
+                            write_logfile=False
+                        )
                     write_success = True
                 except Exception as e:
-                    # Try alternative method
-                    print(f"  ⚠ First attempt failed: {e}")
-                    print(f"  ⟳ Trying alternative method...")
+                    # Try alternative method (CPU fallback)
+                    print(f"  ⚠ GPU encoding failed: {e}")
+                    print(f"  ⟳ Trying CPU encoding fallback...")
                     gc.collect()
                     time.sleep(2)
                     try:
                         vertical_clip.write_videofile(
                             output_path,
                             codec='libx264',
-                            threads=1,
-                            preset='ultrafast',
+                            threads=4,
+                            preset='veryfast',
                             write_logfile=False
                         )
                         write_success = True
@@ -434,18 +480,37 @@ class VerticalVideoGenerator:
                     clip = VideoFileClip(clip_path)
                     vertical_clip = self.crop_to_vertical(clip, side=side)
                     
-                    # Try to write
+                    # Try to write (retry)
                     write_success = False
                     try:
-                        vertical_clip.write_videofile(
-                            output_path,
-                            codec='libx264',
-                            audio_codec='aac',
-                            fps=self.config['fps'],
-                            threads=1,
-                            preset='medium',
-                            write_logfile=False
-                        )
+                        if self.gpu_available:
+                            vertical_clip.write_videofile(
+                                output_path,
+                                codec='h264_nvenc',
+                                audio_codec='aac',
+                                fps=self.config['fps'],
+                                bitrate='15M',
+                                preset='p4',
+                                write_logfile=False,
+                                ffmpeg_params=[
+                                    '-gpu', '0',
+                                    '-rc', 'vbr',
+                                    '-cq', '23',
+                                    '-b:v', '15M',
+                                    '-maxrate', '30M',
+                                    '-bufsize', '60M',
+                                ]
+                            )
+                        else:
+                            vertical_clip.write_videofile(
+                                output_path,
+                                codec='libx264',
+                                audio_codec='aac',
+                                fps=self.config['fps'],
+                                threads=4,
+                                preset='veryfast',
+                                write_logfile=False
+                            )
                         write_success = True
                     except Exception as e:
                         print(f"  ⚠ Retry attempt failed: {e}")
@@ -568,15 +633,37 @@ class VerticalVideoGenerator:
         
         output_path = os.path.join(self.output_dir, output_name)
         
-        # Write video file
+        # Write video file with GPU/CPU auto-detection
         print(f"\nWriting video to: {output_path}")
+        encoder_type = "NVIDIA GPU (NVENC)" if self.gpu_available else "CPU (x264)"
+        print(f"Using {encoder_type} encoding...")
         try:
-            final_clip.write_videofile(
-                output_path,
-                codec='libx264',
-                audio_codec='aac',
-                fps=self.config['fps']
-            )
+            if self.gpu_available:
+                final_clip.write_videofile(
+                    output_path,
+                    codec='h264_nvenc',
+                    audio_codec='aac',
+                    fps=self.config['fps'],
+                    bitrate='15M',
+                    preset='p4',
+                    ffmpeg_params=[
+                        '-gpu', '0',
+                        '-rc', 'vbr',
+                        '-cq', '23',
+                        '-b:v', '15M',
+                        '-maxrate', '30M',
+                        '-bufsize', '60M',
+                    ]
+                )
+            else:
+                final_clip.write_videofile(
+                    output_path,
+                    codec='libx264',
+                    audio_codec='aac',
+                    fps=self.config['fps'],
+                    threads=8,
+                    preset='veryfast'
+                )
             print(f"✓ Video created successfully!")
             print(f"  Resolution: {self.config['resolution'][0]}x{self.config['resolution'][1]}")
             print(f"  Duration: {final_clip.duration:.2f}s")
@@ -651,7 +738,25 @@ class VerticalVideoGenerator:
                 seg_name = f"{platform}_Part{i+1}_{datetime.now().strftime('%Y%m%d')}.mp4"
                 seg_path = os.path.join(self.output_dir, seg_name)
                 
-                segment.write_videofile(seg_path, codec='libx264', audio_codec='aac', fps=self.config['fps'])
+                if self.gpu_available:
+                    segment.write_videofile(
+                        seg_path,
+                        codec='h264_nvenc',
+                        audio_codec='aac',
+                        fps=self.config['fps'],
+                        bitrate='15M',
+                        preset='p4',
+                        ffmpeg_params=['-gpu', '0', '-rc', 'vbr', '-cq', '23']
+                    )
+                else:
+                    segment.write_videofile(
+                        seg_path,
+                        codec='libx264',
+                        audio_codec='aac',
+                        fps=self.config['fps'],
+                        threads=8,
+                        preset='veryfast'
+                    )
                 segments.append(seg_path)
                 print(f"  ✓ Created segment {i+1}/{num_segments}: {seg_name}")
                 segment.close()
