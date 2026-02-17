@@ -5,15 +5,19 @@ with smart zooming and side-based trimming for YouTube, streaming platforms
 """
 
 import os
+import sys
+import time
+import tempfile
 import subprocess
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
 import re
+import json
 try:
-    from moviepy.editor import VideoFileClip, concatenate_videoclips
+    from moviepy.editor import VideoFileClip
 except ImportError:
-    from moviepy import VideoFileClip, concatenate_videoclips
+    from moviepy import VideoFileClip
 
 
 class HorizontalVideoGenerator:
@@ -31,6 +35,7 @@ class HorizontalVideoGenerator:
         self.csv_path = csv_path
         self.side_mapping = {}  # Maps clip names to side preference
         self.gpu_available = self._check_gpu_availability()
+        self.ffmpeg_path = self._get_ffmpeg_path()
         
         # Load side information from CSV
         self._load_side_info()
@@ -85,6 +90,18 @@ class HorizontalVideoGenerator:
             print(f"⚠ Could not detect GPU ({e}) - Using CPU encoding")
             return False
     
+    def _get_ffmpeg_path(self):
+        """Get the FFmpeg executable path."""
+        try:
+            from moviepy.config import get_setting
+            return get_setting("FFMPEG_BINARY")
+        except:
+            try:
+                import imageio_ffmpeg
+                return imageio_ffmpeg.get_ffmpeg_exe()
+            except:
+                return 'ffmpeg'
+    
     def _load_side_info(self):
         """
         Load side information from CSV file to determine trimming positioning.
@@ -128,6 +145,87 @@ class HorizontalVideoGenerator:
             return side
         return 'center'
     
+    def _get_video_info(self, video_path):
+        """
+        Get video dimensions and duration using FFprobe.
+        
+        Args:
+            video_path (str): Path to video file
+            
+        Returns:
+            dict: {'width': int, 'height': int, 'duration': float}
+        """
+        try:
+            cmd = [
+                self.ffmpeg_path.replace('ffmpeg', 'ffprobe'),
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                video_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            data = json.loads(result.stdout)
+            
+            for stream in data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    return {
+                        'width': int(stream.get('width', 0)),
+                        'height': int(stream.get('height', 0)),
+                        'duration': float(stream.get('duration', 0))
+                    }
+        except:
+            # Fallback to MoviePy if ffprobe fails
+            try:
+                clip = VideoFileClip(video_path)
+                info = {'width': clip.w, 'height': clip.h, 'duration': clip.duration}
+                clip.close()
+                return info
+            except:
+                pass
+        return {'width': 0, 'height': 0, 'duration': 0}
+    
+    def _calculate_crop_params(self, original_width, original_height, side='center'):
+        """
+        Calculate crop and scale parameters for FFmpeg filter.
+        
+        Args:
+            original_width (int): Original video width
+            original_height (int): Original video height
+            side (str): 'left', 'right', or 'center'
+            
+        Returns:
+            dict: {'crop_x': int, 'crop_y': int, 'crop_w': int, 'crop_h': int}
+        """
+        zoom = self.config['zoom_factor']
+        trim_percent = self.config['opposite_side_trim']
+        
+        # Calculate crop dimensions (zoom effect)
+        crop_width = int(original_width / zoom)
+        crop_height = int(original_height / zoom)
+        
+        # For stretched look, use full width with minimal trim
+        # This creates wider field of view
+        target_visible_width = int(crop_width * (1 - trim_percent * 0.5))  # Reduced trim by half for wider view
+        target_visible_height = crop_height
+        
+        # Calculate crop position
+        if side == 'left':
+            crop_x = 0
+            crop_y = (original_height - target_visible_height) // 2
+        elif side == 'right':
+            crop_x = original_width - target_visible_width
+            crop_y = (original_height - target_visible_height) // 2
+        else:  # center
+            crop_x = (original_width - target_visible_width) // 2
+            crop_y = (original_height - target_visible_height) // 2
+        
+        return {
+            'crop_x': crop_x,
+            'crop_y': crop_y,
+            'crop_w': target_visible_width,
+            'crop_h': target_visible_height
+        }
+    
     def get_clip_files(self, pattern=None):
         """
         Get all video clip files from the clips folder.
@@ -148,71 +246,10 @@ class HorizontalVideoGenerator:
         
         return sorted(clips)
     
-    def process_to_horizontal(self, clip, side='center'):
+    def create_weekly_highlight_gpu(self, clip_files=None, output_name=None):
         """
-        Process horizontal video with zoom and smart trimming.
-        
-        Args:
-            clip: VideoFileClip object
-            side (str): 'left', 'right', or 'center' - determines trim position
-            
-        Returns:
-            VideoFileClip: Processed horizontal video
-        """
-        target_width, target_height = self.config['resolution']
-        original_width = clip.w
-        original_height = clip.h
-        
-        zoom = self.config['zoom_factor']
-        trim_percent = self.config['opposite_side_trim']
-        
-        # Step 1: Calculate crop area from original video (like phone pinch zoom)
-        # zoom=1.15 means we want to see 1/1.15 = 86.96% of the original (zoomed in)
-        crop_width = int(original_width / zoom)
-        crop_height = int(original_height / zoom)
-        
-        # Step 2: Calculate how much to trim from opposite side
-        # We want to keep (1 - trim_percent) of the CROPPED width
-        target_visible_width = int(crop_width * (1 - trim_percent))
-        target_visible_height = crop_height
-        
-        # Step 3: Calculate position in ORIGINAL video to crop from
-        if side == 'left':
-            # Keep left side, trim from right
-            x1 = 0
-            x2 = target_visible_width
-            y1 = (original_height - target_visible_height) // 2
-            y2 = y1 + target_visible_height
-        elif side == 'right':
-            # Keep right side, trim from left
-            x1 = original_width - target_visible_width
-            x2 = original_width
-            y1 = (original_height - target_visible_height) // 2
-            y2 = y1 + target_visible_height
-        else:
-            # Center: keep middle portion
-            x1 = (original_width - target_visible_width) // 2
-            x2 = x1 + target_visible_width
-            y1 = (original_height - target_visible_height) // 2
-            y2 = y1 + target_visible_height
-        
-        # Step 4: Crop from ORIGINAL video (this creates the zoom effect)
-        try:
-            cropped = clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
-        except (AttributeError, TypeError):
-            cropped = clip.crop(x1=x1, y1=y1, x2=x2, y2=y2)
-        
-        # Step 5: Scale the cropped portion to target resolution (1920x1080)
-        try:
-            final = cropped.resized(self.config['resolution'])
-        except (AttributeError, TypeError):
-            final = cropped.resize(self.config['resolution'])
-        
-        return final
-    
-    def create_weekly_highlight(self, clip_files=None, output_name=None):
-        """
-        Create a weekly highlight horizontal video from clips.
+        Create a weekly highlight horizontal video using GPU-accelerated FFmpeg filters.
+        Bypasses MoviePy processing for maximum GPU utilization.
         
         Args:
             clip_files (list): List of clip file paths. If None, uses all clips.
@@ -221,7 +258,7 @@ class HorizontalVideoGenerator:
         Returns:
             str: Path to generated video
         """
-        print("Creating Weekly Highlight Horizontal Video...")
+        print("Creating Weekly Highlight Horizontal Video (GPU-Accelerated)...")
         print("=" * 50)
         
         # Get clips to process
@@ -234,125 +271,233 @@ class HorizontalVideoGenerator:
         
         print(f"✓ Found {len(clip_files)} clips to process")
         
-        # Load and process clips
-        processed_clips = []
-        for idx, clip_path in enumerate(clip_files):
-            try:
-                clip_filename = os.path.basename(clip_path)
-                print(f"Processing clip {idx + 1}/{len(clip_files)}: {clip_filename}")
-                
-                # Get side preference for this clip
-                side = self._get_side_for_clip(clip_filename)
-                
-                clip = VideoFileClip(clip_path)
-                processed_clip = self.process_to_horizontal(clip, side=side)
-                processed_clips.append(processed_clip)
-                print(f"  ✓ Processed to {self.config['resolution'][0]}x{self.config['resolution'][1]} - Zoom: 15%, Side: {side}")
-            except Exception as e:
-                print(f"  ✗ Error processing clip: {e}")
-        
-        if not processed_clips:
-            print("✗ No clips successfully processed")
-            return None
-        
-        # Concatenate clips
-        print(f"\nCombining {len(processed_clips)} clips...")
-        try:
-            if self.config['add_transitions']:
-                # Add crossfade transitions
-                final_clip = concatenate_videoclips(
-                    processed_clips,
-                    method="compose",
-                    padding=-self.config['transition_duration']
-                )
-            else:
-                final_clip = concatenate_videoclips(processed_clips, method="compose")
-            
-            print(f"✓ Combined clips - Total duration: {final_clip.duration:.2f}s")
-        except Exception as e:
-            print(f"✗ Error combining clips: {e}")
-            return None
-        
         # Generate output filename
         if output_name is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
             output_name = f"Weekly_Highlight_Horizontal_{date_str}.mp4"
         
         output_path = os.path.join(self.output_dir, output_name)
+        target_width, target_height = self.config['resolution']
         
-        # Write video file with GPU/CPU auto-detection
-        print(f"\nWriting video to: {output_path}")
+        # Build FFmpeg command with filter_complex
+        cmd = [self.ffmpeg_path]
+        
+        # Add all input files
+        for clip_path in clip_files:
+            cmd.extend(['-i', clip_path])
+        
+        # Build filter chain
+        filter_parts = []
+        total_duration = 0
+        
+        for idx, clip_path in enumerate(clip_files):
+            clip_filename = os.path.basename(clip_path)
+            side = self._get_side_for_clip(clip_filename)
+            
+            # Get video dimensions
+            video_info = self._get_video_info(clip_path)
+            if video_info['width'] == 0:
+                print(f"⚠ Skipping clip {idx + 1}: Could not read video info")
+                continue
+            
+            total_duration += video_info['duration']
+            
+            # Calculate crop parameters
+            crop_params = self._calculate_crop_params(
+                video_info['width'],
+                video_info['height'],
+                side
+            )
+            
+            print(f"Processing clip {idx + 1}/{len(clip_files)}: {clip_filename}")
+            print(f"  Side: {side}, Crop: {crop_params['crop_w']}x{crop_params['crop_h']}")
+            
+            # Create filter for this clip: crop -> scale
+            filter_parts.append(
+                f"[{idx}:v]crop={crop_params['crop_w']}:{crop_params['crop_h']}:"
+                f"{crop_params['crop_x']}:{crop_params['crop_y']},"
+                f"scale={target_width}:{target_height}[v{idx}]"
+            )
+        
+        # Concatenate all processed clips
+        concat_inputs = ''.join([f"[v{i}][{i}:a]" for i in range(len(clip_files))])
+        filter_parts.append(f"{concat_inputs}concat=n={len(clip_files)}:v=1:a=1[outv][outa]")
+        
+        # Complete filter_complex
+        filter_complex = ';'.join(filter_parts)
+        
+        # Write filter to temporary file to avoid command line length limits
+        filter_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+        filter_file.write(filter_complex)
+        filter_file.close()
+        
+        cmd.extend(['-filter_complex_script', filter_file.name])
+        cmd.extend(['-map', '[outv]', '-map', '[outa]'])
+        
+        # Add encoding parameters
         encoder_type = "NVIDIA GPU (NVENC)" if self.gpu_available else "CPU (x264)"
-        print(f"Using {encoder_type} encoding...")
+        print(f"\nUsing {encoder_type} encoding...")
+        
+        if self.gpu_available:
+            # GPU encoding - Optimized for ~150MB file size
+            cmd.extend([
+                '-c:v', 'h264_nvenc',
+                '-preset', 'p4',
+                '-rc', 'vbr',
+                '-cq', '30',  # Increased from 23 for smaller file size
+                '-b:v', '0',
+                '-bufsize', '5M',  # Reduced buffer for smaller file
+                '-maxrate', '25M',  # Reduced max rate
+                '-bf', '3',
+                '-g', '250',
+                '-c:a', 'aac',
+                '-b:a', '128k',  # Reduced audio bitrate
+                '-movflags', '+faststart'
+            ])
+        else:
+            # CPU encoding
+            cmd.extend([
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-crf', '26',  # Increased from 23 for smaller file size
+                '-c:a', 'aac',
+                '-b:a', '128k'
+            ])
+        
+        cmd.extend(['-y', output_path])
+        
+        # Execute FFmpeg command with tqdm-style progress
+        print(f"\nEncoding with {encoder_type}...")
+        print(f"Total duration: {total_duration:.1f}s")
+        print(f"━" * 50)
         
         try:
-            if self.gpu_available:
-                # GPU encoding with NVENC - direct write, no temp file
-                final_clip.write_videofile(
-                    output_path,
-                    fps=self.config['fps'],
-                    preset='medium',
-                    audio_codec='aac',
-                    ffmpeg_params=[
-                        '-c:v', 'h264_nvenc',
-                        '-preset', 'p4',
-                        '-rc', 'vbr',
-                        '-cq', '23',
-                        '-b:v', '0',
-                        '-bufsize', '10M',
-                        '-maxrate', '50M',
-                        '-bf', '3',
-                        '-g', '250',
-                        '-movflags', '+faststart'
-                    ]
-                )
+            # Run FFmpeg with real-time output
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            
+            # Track progress with tqdm-style display
+            start_time = time.time()
+            last_time_sec = 0
+            
+            for line in process.stdout:
+                line = line.strip()
+                # Parse FFmpeg output for time
+                if 'time=' in line:
+                    time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})', line)
+                    fps_match = re.search(r'fps=\s*(\d+\.?\d*)', line)
+                    speed_match = re.search(r'speed=\s*(\d+\.?\d*)x', line)
+                    
+                    if time_match:
+                        hours = int(time_match.group(1))
+                        minutes = int(time_match.group(2))
+                        seconds = int(time_match.group(3))
+                        current_sec = hours * 3600 + minutes * 60 + seconds
+                        
+                        if total_duration > 0 and current_sec != last_time_sec:
+                            # Calculate progress
+                            progress = min(current_sec / total_duration, 1.0)
+                            percentage = int(progress * 100)
+                            
+                            # Build progress bar
+                            bar_length = 50
+                            filled = int(bar_length * progress)
+                            bar = '█' * filled + '░' * (bar_length - filled)
+                            
+                            # Get metrics
+                            fps = fps_match.group(1) if fps_match else '0'
+                            speed = speed_match.group(1) if speed_match else '0'
+                            elapsed = time.time() - start_time
+                            
+                            # Calculate ETA
+                            if progress > 0:
+                                eta = (elapsed / progress) - elapsed
+                                eta_str = f"{int(eta//60):02d}:{int(eta%60):02d}"
+                            else:
+                                eta_str = "--:--"
+                            
+                            # Display tqdm-style progress
+                            print(f"\rProgress: {percentage:3d}%|{bar}| {current_sec:.0f}/{total_duration:.0f}s "
+                                  f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}<{eta_str}, {fps}fps, {speed}x]",
+                                  end='', flush=True)
+                            
+                            last_time_sec = current_sec
+            
+            process.wait()
+            result_code = process.returncode
+            
+            # Clear progress line and show completion
+            print(f"\rProgress: 100%|{'█'*50}| Completed!{' '*50}")
+            print(f"━" * 50)
+            print(f"━" * 50)
+            
+            if result_code == 0:
+                file_size = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"✓ Video created successfully!")
+                print(f"  Resolution: {target_width}x{target_height}")
+                print(f"  Clips combined: {len(clip_files)}")
+                print(f"  Zoom: {int((self.config['zoom_factor'] - 1) * 100)}%")
+                print(f"  Trim: {int(self.config['opposite_side_trim'] * 100)}% from opposite side")
+                print(f"  Encoder: {encoder_type}")
+                print(f"  File size: {file_size:.2f} MB")
+                print(f"  Location: {output_path}")
+                return output_path
             else:
-                # CPU encoding
-                final_clip.write_videofile(
-                    output_path,
-                    codec='libx264',
-                    audio_codec='aac',
-                    fps=self.config['fps'],
-                    threads=8,
-                    preset='veryfast',
-                    ffmpeg_params=['-crf', '23']
-                )
-            
-            print(f"✓ Video created successfully!")
-            print(f"  Resolution: {self.config['resolution'][0]}x{self.config['resolution'][1]}")
-            print(f"  Duration: {final_clip.duration:.2f}s")
-            print(f"  Zoom: {int((self.config['zoom_factor'] - 1) * 100)}%")
-            print(f"  Trim: {int(self.config['opposite_side_trim'] * 100)}% from opposite side")
-            print(f"  Encoder: {encoder_type}")
-            print(f"  Location: {output_path}")
-            
+                print(f"✗ FFmpeg encoding failed with code {result_code}")
+                
+                # Try CPU fallback if GPU failed
+                if self.gpu_available:
+                    print("\n⟳ Retrying with CPU encoding...")
+                    # Update command with CPU encoding
+                    cmd_cpu = cmd[:cmd.index('-c:v') if '-c:v' in cmd else len(cmd)]
+                    cmd_cpu.extend([
+                        '-c:v', 'libx264',
+                        '-preset', 'ultrafast',
+                        '-crf', '26',
+                        '-c:a', 'aac',
+                        '-b:a', '128k',
+                        '-y', output_path
+                    ])
+                    
+                    result = subprocess.run(cmd_cpu, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                    if result.returncode == 0:
+                        file_size = os.path.getsize(output_path) / (1024 * 1024)
+                        print(f"✓ Video created with CPU fallback ({file_size:.2f} MB)")
+                        return output_path
+                    else:
+                        print(f"✗ CPU fallback also failed: {result.stderr}")
+                
+                return None
         except Exception as e:
-            print(f"✗ Error with {encoder_type} encoding: {e}")
-            if self.gpu_available:
-                # Fallback to CPU if GPU fails
-                print("  Retrying with CPU encoding...")
-                try:
-                    final_clip.write_videofile(
-                        output_path,
-                        codec='libx264',
-                        audio_codec='aac',
-                        fps=self.config['fps'],
-                        threads=8,
-                        preset='veryfast',
-                        ffmpeg_params=['-crf', '23']
-                    )
-                    print(f"✓ Video created with CPU fallback")
-                except Exception as e2:
-                    print(f"✗ CPU fallback also failed: {e2}")
-            else:
-                print(f"✗ Error writing video: {e}")
+            print(f"✗ Error running FFmpeg: {e}")
+            return None
+        finally:
+            # Clean up temporary filter file
+            try:
+                if os.path.exists(filter_file.name):
+                    os.unlink(filter_file.name)
+            except:
+                pass
+    
+    def create_weekly_highlight(self, clip_files=None, output_name=None):
+        """
+        Create a weekly highlight horizontal video.
+        Uses GPU-accelerated FFmpeg processing for maximum performance.
         
-        # Clean up
-        final_clip.close()
-        for clip in processed_clips:
-            clip.close()
-        
-        return output_path
+        Args:
+            clip_files (list): List of clip file paths. If None, uses all clips.
+            output_name (str): Output filename. If None, auto-generates.
+            
+        Returns:
+            str: Path to generated video
+        """
+        return self.create_weekly_highlight_gpu(clip_files, output_name)
 
 
 def main():
