@@ -56,11 +56,24 @@ class HorizontalVideoGenerator:
             bool: True if GPU encoding is available, False otherwise
         """
         try:
+            # Try to get ffmpeg path from moviepy/imageio
+            ffmpeg_path = 'ffmpeg'
+            try:
+                from moviepy.config import get_setting
+                ffmpeg_path = get_setting("FFMPEG_BINARY")
+            except:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                except:
+                    pass
+            
             result = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-encoders'],
+                [ffmpeg_path, '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             if 'h264_nvenc' in result.stdout:
                 print("✓ NVIDIA GPU detected - Hardware encoding enabled")
@@ -68,8 +81,8 @@ class HorizontalVideoGenerator:
             else:
                 print("⚠ No NVIDIA GPU detected - Using CPU encoding")
                 return False
-        except Exception:
-            print("⚠ Could not detect GPU - Using CPU encoding")
+        except Exception as e:
+            print(f"⚠ Could not detect GPU ({e}) - Using CPU encoding")
             return False
     
     def _load_side_info(self):
@@ -271,23 +284,26 @@ class HorizontalVideoGenerator:
         print(f"\nWriting video to: {output_path}")
         encoder_type = "NVIDIA GPU (NVENC)" if self.gpu_available else "CPU (x264)"
         print(f"Using {encoder_type} encoding...")
+        
         try:
             if self.gpu_available:
-                # GPU encoding
+                # GPU encoding with NVENC - direct write, no temp file
                 final_clip.write_videofile(
                     output_path,
-                    codec='h264_nvenc',
-                    audio_codec='aac',
                     fps=self.config['fps'],
-                    bitrate='20M',
-                    preset='p4',
+                    preset='medium',
+                    audio_codec='aac',
                     ffmpeg_params=[
-                        '-gpu', '0',
+                        '-c:v', 'h264_nvenc',
+                        '-preset', 'p4',
                         '-rc', 'vbr',
                         '-cq', '23',
-                        '-b:v', '20M',
-                        '-maxrate', '40M',
-                        '-bufsize', '80M',
+                        '-b:v', '0',
+                        '-bufsize', '10M',
+                        '-maxrate', '50M',
+                        '-bf', '3',
+                        '-g', '250',
+                        '-movflags', '+faststart'
                     ]
                 )
             else:
@@ -298,8 +314,10 @@ class HorizontalVideoGenerator:
                     audio_codec='aac',
                     fps=self.config['fps'],
                     threads=8,
-                    preset='veryfast'
+                    preset='veryfast',
+                    ffmpeg_params=['-crf', '23']
                 )
+            
             print(f"✓ Video created successfully!")
             print(f"  Resolution: {self.config['resolution'][0]}x{self.config['resolution'][1]}")
             print(f"  Duration: {final_clip.duration:.2f}s")
@@ -307,9 +325,11 @@ class HorizontalVideoGenerator:
             print(f"  Trim: {int(self.config['opposite_side_trim'] * 100)}% from opposite side")
             print(f"  Encoder: {encoder_type}")
             print(f"  Location: {output_path}")
+            
         except Exception as e:
-            print(f"✗ Error writing video: {e}")
+            print(f"✗ Error with {encoder_type} encoding: {e}")
             if self.gpu_available:
+                # Fallback to CPU if GPU fails
                 print("  Retrying with CPU encoding...")
                 try:
                     final_clip.write_videofile(
@@ -318,19 +338,19 @@ class HorizontalVideoGenerator:
                         audio_codec='aac',
                         fps=self.config['fps'],
                         threads=8,
-                        preset='veryfast'
+                        preset='veryfast',
+                        ffmpeg_params=['-crf', '23']
                     )
                     print(f"✓ Video created with CPU fallback")
                 except Exception as e2:
                     print(f"✗ CPU fallback also failed: {e2}")
-                    return None
             else:
-                return None
-        finally:
-            # Clean up
-            final_clip.close()
-            for clip in processed_clips:
-                clip.close()
+                print(f"✗ Error writing video: {e}")
+        
+        # Clean up
+        final_clip.close()
+        for clip in processed_clips:
+            clip.close()
         
         return output_path
 

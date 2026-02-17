@@ -44,12 +44,25 @@ class VideoClipExtractor:
             bool: True if GPU encoding is available, False otherwise
         """
         try:
+            # Try to get ffmpeg path from moviepy/imageio
+            ffmpeg_path = 'ffmpeg'
+            try:
+                from moviepy.config import get_setting
+                ffmpeg_path = get_setting("FFMPEG_BINARY")
+            except:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                except:
+                    pass
+            
             # Check if ffmpeg supports h264_nvenc codec
             result = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-encoders'],
+                [ffmpeg_path, '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             if 'h264_nvenc' in result.stdout:
                 print("✓ NVIDIA GPU detected - Hardware encoding enabled")
@@ -57,9 +70,52 @@ class VideoClipExtractor:
             else:
                 print("⚠ No NVIDIA GPU detected - Using CPU encoding")
                 return False
-        except Exception:
-            print("⚠ Could not detect GPU - Using CPU encoding")
+        except Exception as e:
+            print(f"⚠ Could not detect GPU ({e}) - Using CPU encoding")
             return False
+    
+    def get_overlay_ffmpeg_params(self, camera, timestamp_str, side, placement, clip_width, clip_height):
+        """
+        Generate FFmpeg drawtext parameters for GPU-accelerated overlay.
+        Text is burned in during encoding for better performance.
+        
+        Args:
+            camera (str): Camera name (e.g., 'Cam1')
+            timestamp_str (str): Timestamp in HH:MM:SS format
+            side (str): Side value from CSV ('left', 'right', or 'N/A')
+            placement: Placement/clip number
+            clip_width (int): Width of the video clip
+            clip_height (int): Height of the video clip
+            
+        Returns:
+            list: FFmpeg filter parameters for text overlay
+        """
+        # Escape all colons in the text content for FFmpeg drawtext filter
+        # FFmpeg uses : as parameter separator, so colons in text must be escaped
+        timestamp_escaped = timestamp_str.replace(':', '\\:')
+        camera_escaped = str(camera).replace(':', '\\:')
+        side_escaped = str(side).replace(':', '\\:')
+        
+        # Create debug text with escaped colons
+        debug_text = f"Cam\\: {camera_escaped} | Time\\: {timestamp_escaped} | Side\\: {side_escaped} | #{placement}"
+        
+        # Position text in bottom right corner with padding
+        x_pos = "w-tw-20"  # 20 pixels from right edge
+        y_pos = "h-th-20"  # 20 pixels from bottom edge
+        
+        # Build drawtext filter
+        drawtext_filter = (
+            f"drawtext=text='{debug_text}'"
+            f":fontfile=C\\\\:/Windows/Fonts/arial.ttf"
+            f":fontsize=18"
+            f":fontcolor=white"
+            f":borderw=2"
+            f":bordercolor=black@0.5"
+            f":x={x_pos}"
+            f":y={y_pos}"
+        )
+        
+        return ['-vf', drawtext_filter]
     
     def find_video_file(self, camera_name):
         """
@@ -246,11 +302,18 @@ class VideoClipExtractor:
                 
                 # Get placement/clip number
                 clip_number = ""
+                placement_num = idx + 1
                 if 'Placement' in df.columns:
                     placement = row['Placement']
-                    clip_number = f"clip{int(placement):02d}" if isinstance(placement, (int, float)) else f"clip{idx+1:02d}"
+                    placement_num = int(placement) if isinstance(placement, (int, float)) else idx + 1
+                    clip_number = f"clip{placement_num:02d}"
                 else:
-                    clip_number = f"clip{idx+1:02d}"
+                    clip_number = f"clip{placement_num:02d}"
+                
+                # Get Side information for debug overlay
+                side = 'N/A'
+                if 'Side' in df.columns:
+                    side = str(row['Side']).strip() if pd.notna(row['Side']) else 'N/A'
                 
                 # Convert timestamp to HH_MM_SS format
                 time_str = self.seconds_to_hhmmss(timestamp)
@@ -279,29 +342,56 @@ class VideoClipExtractor:
                 gc.collect()
                 time.sleep(0.5)
                 
+                # Get overlay parameters for GPU-accelerated text rendering
+                overlay_params = self.get_overlay_ffmpeg_params(
+                    camera_name, 
+                    time_str.replace('_', ':'), 
+                    side, 
+                    placement_num,
+                    int(clip.w),
+                    int(clip.h)
+                )
+                
                 # Write clip to file with GPU/CPU selection
                 write_success = False
                 try:
                     if self.gpu_available:
-                        # Try GPU encoding first
+                        # GPU encoding with NVENC + GPU-accelerated overlay
+                        base_params = [
+                            '-c:v', 'h264_nvenc',
+                            '-preset', 'p4',
+                            '-rc', 'vbr',
+                            '-cq', '28',
+                            '-b:v', '0',
+                            '-bufsize', '10M',
+                            '-maxrate', '50M',
+                            '-bf', '3',
+                            '-g', '250',
+                            '-movflags', '+faststart'
+                        ]
+                        # Merge overlay params with encoding params
+                        all_params = overlay_params + base_params
+                        
                         clip.write_videofile(
                             output_path,
-                            codec='h264_nvenc',
+                            fps=clip.fps,
+                            preset='medium',
                             audio_codec='aac',
-                            bitrate='15M',
-                            preset='p4',
-                            write_logfile=False,
-                            ffmpeg_params=['-gpu', '0', '-rc', 'vbr', '-cq', '23']
+                            ffmpeg_params=all_params
                         )
                     else:
-                        # Use CPU encoding
+                        # CPU encoding with overlay
+                        base_params = ['-crf', '23']
+                        all_params = overlay_params + base_params
+                        
                         clip.write_videofile(
                             output_path,
                             codec='libx264',
                             audio_codec='aac',
                             threads=4,
                             preset='veryfast',
-                            write_logfile=False
+                            write_logfile=False,
+                            ffmpeg_params=all_params
                         )
                     write_success = True
                 except Exception as e:
@@ -311,6 +401,7 @@ class VideoClipExtractor:
                     gc.collect()
                     time.sleep(2)
                     try:
+                        # Fallback without overlay if needed
                         clip.write_videofile(
                             output_path,
                             codec='libx264',
@@ -399,11 +490,18 @@ class VideoClipExtractor:
                     
                     # Generate filename
                     video_name = Path(video_path).stem
+                    placement_num = idx + 1
                     if 'Placement' in df.columns:
                         placement = row['Placement']
-                        clip_number = f"clip{int(placement):02d}" if isinstance(placement, (int, float)) else f"clip{idx+1:02d}"
+                        placement_num = int(placement) if isinstance(placement, (int, float)) else idx + 1
+                        clip_number = f"clip{placement_num:02d}"
                     else:
-                        clip_number = f"clip{idx+1:02d}"
+                        clip_number = f"clip{placement_num:02d}"
+                    
+                    # Get Side information for debug overlay
+                    side = 'N/A'
+                    if 'Side' in df.columns:
+                        side = str(row['Side']).strip() if pd.notna(row['Side']) else 'N/A'
                     
                     time_str = self.seconds_to_hhmmss(timestamp)
                     clip_name = f"{video_name}_{clip_number}_{time_str}.mp4"
@@ -419,27 +517,55 @@ class VideoClipExtractor:
                     gc.collect()
                     time.sleep(3.0)
                     
+                    # Get overlay parameters for GPU-accelerated text rendering
+                    overlay_params = self.get_overlay_ffmpeg_params(
+                        camera_name, 
+                        time_str.replace('_', ':'), 
+                        side, 
+                        placement_num,
+                        int(clip.w),
+                        int(clip.h)
+                    )
+                    
                     # Try to write (retry attempt)
                     write_success = False
                     try:
                         if self.gpu_available:
+                            # GPU encoding with overlay
+                            base_params = [
+                                '-c:v', 'h264_nvenc',
+                                '-preset', 'p4',
+                                '-rc', 'vbr',
+                                '-cq', '28',
+                                '-b:v', '0',
+                                '-bufsize', '10M',
+                                '-maxrate', '50M',
+                                '-bf', '3',
+                                '-g', '250',
+                                '-movflags', '+faststart'
+                            ]
+                            all_params = overlay_params + base_params
+                            
                             clip.write_videofile(
                                 output_path,
-                                codec='h264_nvenc',
+                                fps=clip.fps,
+                                preset='medium',
                                 audio_codec='aac',
-                                bitrate='15M',
-                                preset='p4',
-                                write_logfile=False,
-                                ffmpeg_params=['-gpu', '0', '-rc', 'vbr', '-cq', '23']
+                                ffmpeg_params=all_params
                             )
                         else:
+                            # CPU encoding with overlay
+                            base_params = ['-crf', '23']
+                            all_params = overlay_params + base_params
+                            
                             clip.write_videofile(
                                 output_path,
                                 codec='libx264',
                                 audio_codec='aac',
                                 threads=4,
                                 preset='veryfast',
-                                write_logfile=False
+                                write_logfile=False,
+                                ffmpeg_params=all_params
                             )
                         write_success = True
                     except Exception as e:
@@ -483,6 +609,29 @@ class VideoClipExtractor:
         for camera_name, (video, _) in self.video_cache.items():
             video.close()
             print(f"✓ Closed video for {camera_name}")
+        
+        # Final cleanup - remove all TEMP_MPY files from output directory and root
+        print(f"\nCleaning up temporary files...")
+        cleanup_count = 0
+        
+        # Clean output directory
+        for temp_file in glob.glob(os.path.join(self.output_dir, "*TEMP_MPY*")):
+            try:
+                os.remove(temp_file)
+                cleanup_count += 1
+            except:
+                pass
+        
+        # Clean root/current directory
+        for temp_file in glob.glob("*TEMP_MPY*"):
+            try:
+                os.remove(temp_file)
+                cleanup_count += 1
+            except:
+                pass
+        
+        if cleanup_count > 0:
+            print(f"✓ Removed {cleanup_count} temporary file(s)")
         
         # Summary
         print(f"\n{'='*50}")

@@ -64,11 +64,24 @@ class VerticalVideoGenerator:
             bool: True if GPU encoding is available, False otherwise
         """
         try:
+            # Try to get ffmpeg path from moviepy/imageio
+            ffmpeg_path = 'ffmpeg'
+            try:
+                from moviepy.config import get_setting
+                ffmpeg_path = get_setting("FFMPEG_BINARY")
+            except:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                except:
+                    pass
+            
             result = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-encoders'],
+                [ffmpeg_path, '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             if 'h264_nvenc' in result.stdout:
                 print("✓ NVIDIA GPU detected - Hardware encoding enabled")
@@ -76,8 +89,8 @@ class VerticalVideoGenerator:
             else:
                 print("⚠ No NVIDIA GPU detected - Using CPU encoding")
                 return False
-        except Exception:
-            print("⚠ Could not detect GPU - Using CPU encoding")
+        except Exception as e:
+            print(f"⚠ Could not detect GPU ({e}) - Using CPU encoding")
             return False
     
     def _load_side_info(self):
@@ -362,24 +375,22 @@ class VerticalVideoGenerator:
                 try:
                     print(f"  Writing with {encoder_type}: {output_name}")
                     if self.gpu_available:
+                        # GPU encoding - no codec param, use ffmpeg_params only
                         vertical_clip.write_videofile(
                             output_path,
-                            codec='h264_nvenc',
                             audio_codec='aac',
                             fps=self.config['fps'],
-                            bitrate='15M',
-                            preset='p4',
                             write_logfile=False,
                             ffmpeg_params=[
-                                '-gpu', '0',
+                                '-c:v', 'h264_nvenc',
+                                '-preset', 'p4',
                                 '-rc', 'vbr',
-                                '-cq', '23',
-                                '-b:v', '15M',
-                                '-maxrate', '30M',
-                                '-bufsize', '60M',
+                                '-cq', '28',
+                                '-b:v', '0'
                             ]
                         )
                     else:
+                        # CPU encoding
                         vertical_clip.write_videofile(
                             output_path,
                             codec='libx264',
@@ -387,7 +398,8 @@ class VerticalVideoGenerator:
                             fps=self.config['fps'],
                             threads=4,
                             preset='veryfast',
-                            write_logfile=False
+                            write_logfile=False,
+                            ffmpeg_params=['-crf', '23']
                         )
                     write_success = True
                 except Exception as e:
@@ -486,19 +498,15 @@ class VerticalVideoGenerator:
                         if self.gpu_available:
                             vertical_clip.write_videofile(
                                 output_path,
-                                codec='h264_nvenc',
                                 audio_codec='aac',
                                 fps=self.config['fps'],
-                                bitrate='15M',
-                                preset='p4',
                                 write_logfile=False,
                                 ffmpeg_params=[
-                                    '-gpu', '0',
+                                    '-c:v', 'h264_nvenc',
+                                    '-preset', 'p4',
                                     '-rc', 'vbr',
-                                    '-cq', '23',
-                                    '-b:v', '15M',
-                                    '-maxrate', '30M',
-                                    '-bufsize', '60M',
+                                    '-cq', '28',
+                                    '-b:v', '0'
                                 ]
                             )
                         else:
@@ -509,7 +517,8 @@ class VerticalVideoGenerator:
                                 fps=self.config['fps'],
                                 threads=4,
                                 preset='veryfast',
-                                write_logfile=False
+                                write_logfile=False,
+                                ffmpeg_params=['-crf', '23']
                             )
                         write_success = True
                     except Exception as e:
@@ -639,30 +648,29 @@ class VerticalVideoGenerator:
         print(f"Using {encoder_type} encoding...")
         try:
             if self.gpu_available:
+                # GPU encoding - no codec param, ffmpeg_params only
                 final_clip.write_videofile(
                     output_path,
-                    codec='h264_nvenc',
                     audio_codec='aac',
                     fps=self.config['fps'],
-                    bitrate='15M',
-                    preset='p4',
                     ffmpeg_params=[
-                        '-gpu', '0',
+                        '-c:v', 'h264_nvenc',
+                        '-preset', 'p4',
                         '-rc', 'vbr',
-                        '-cq', '23',
-                        '-b:v', '15M',
-                        '-maxrate', '30M',
-                        '-bufsize', '60M',
+                        '-cq', '28',
+                        '-b:v', '0'
                     ]
                 )
             else:
+                # CPU encoding
                 final_clip.write_videofile(
                     output_path,
                     codec='libx264',
                     audio_codec='aac',
                     fps=self.config['fps'],
                     threads=8,
-                    preset='veryfast'
+                    preset='veryfast',
+                    ffmpeg_params=['-crf', '23']
                 )
             print(f"✓ Video created successfully!")
             print(f"  Resolution: {self.config['resolution'][0]}x{self.config['resolution'][1]}")
@@ -741,12 +749,9 @@ class VerticalVideoGenerator:
                 if self.gpu_available:
                     segment.write_videofile(
                         seg_path,
-                        codec='h264_nvenc',
                         audio_codec='aac',
                         fps=self.config['fps'],
-                        bitrate='15M',
-                        preset='p4',
-                        ffmpeg_params=['-gpu', '0', '-rc', 'vbr', '-cq', '23']
+                        ffmpeg_params=['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '28', '-b:v', '0']
                     )
                 else:
                     segment.write_videofile(
@@ -755,7 +760,8 @@ class VerticalVideoGenerator:
                         audio_codec='aac',
                         fps=self.config['fps'],
                         threads=8,
-                        preset='veryfast'
+                        preset='veryfast',
+                        ffmpeg_params=['-crf', '23']
                     )
                 segments.append(seg_path)
                 print(f"  ✓ Created segment {i+1}/{num_segments}: {seg_name}")
