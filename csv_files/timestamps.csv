@@ -3,7 +3,6 @@ Placement,Camera,Time,Side
 1,cam1,00:29:11,left
 2,cam1,00:29:15,left
 3,cam1,00:30:13,right
-4,cam1,00:30:13,right
 5,cam1,00:30:26,right
 6,cam1,00:30:32,right
 7,cam1,00:30:57,left
@@ -22,7 +21,6 @@ Placement,Camera,Time,Side
 21,cam1,00:38:53,left
 22,cam1,00:38:59,right
 23,cam1,00:39:01,right
-24,cam1,00:39:01,right
 25,cam1,00:39:31,left
 26,cam1,00:39:39,right
 27,cam1,00:39:45,right

@@ -14,10 +14,15 @@ from datetime import datetime
 import pandas as pd
 import re
 import json
+
+# Optional MoviePy import for fallback
 try:
     from moviepy.editor import VideoFileClip
 except ImportError:
-    from moviepy import VideoFileClip
+    try:
+        from moviepy import VideoFileClip
+    except ImportError:
+        VideoFileClip = None
 
 
 class HorizontalVideoGenerator:
@@ -161,6 +166,37 @@ class HorizontalVideoGenerator:
             return side
         return 'center'
     
+    def _get_video_duration(self, video_path):
+        """
+        Get video duration using FFmpeg.
+        
+        Args:
+            video_path (str): Path to video file
+            
+        Returns:
+            float: Duration in seconds
+        """
+        try:
+            cmd = [
+                self.ffmpeg_path,
+                '-i', video_path,
+                '-f', 'null',
+                '-'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            output = result.stderr
+            
+            # Look for Duration: HH:MM:SS.MS
+            duration_match = re.search(r'Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})', output)
+            if duration_match:
+                hours = int(duration_match.group(1))
+                minutes = int(duration_match.group(2))
+                seconds = float(duration_match.group(3))
+                return hours * 3600 + minutes * 60 + seconds
+        except Exception as e:
+            print(f"⚠ Could not get video duration: {e}")
+        return 0
+    
     def _get_video_info(self, video_path):
         """
         Get video dimensions and duration using FFprobe.
@@ -191,13 +227,14 @@ class HorizontalVideoGenerator:
                     }
         except:
             # Fallback to MoviePy if ffprobe fails
-            try:
-                clip = VideoFileClip(video_path)
-                info = {'width': clip.w, 'height': clip.h, 'duration': clip.duration}
-                clip.close()
-                return info
-            except:
-                pass
+            if VideoFileClip:
+                try:
+                    clip = VideoFileClip(video_path)
+                    info = {'width': clip.w, 'height': clip.h, 'duration': clip.duration}
+                    clip.close()
+                    return info
+                except:
+                    pass
         return {'width': 0, 'height': 0, 'duration': 0}
     
     def _calculate_crop_params(self, original_width, original_height, side='center'):
@@ -287,13 +324,25 @@ class HorizontalVideoGenerator:
         
         print(f"✓ Found {len(clip_files)} clips to process")
         
-        # Generate output filename
+        # Generate output filename with timestamp
         if output_name is None:
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            output_name = f"Weekly_Highlight_Horizontal_{date_str}.mp4"
+            timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_name = f"Weekly_Highlight_Horizontal_{timestamp_str}.mp4"
         
         output_path = os.path.join(self.output_dir, output_name)
         target_width, target_height = self.config['resolution']
+        
+        # Check if intro exists (will be added at the end)
+        intro_path = os.path.join('intro_video', 'horizontal_introduction.mp4')
+        has_intro = os.path.exists(intro_path)
+        
+        # If intro exists, create temp file for main compilation
+        if has_intro:
+            temp_output_path = os.path.join(self.output_dir, 'temp_main_video.mp4')
+            final_output_path = output_path
+            output_path = temp_output_path
+            print(f"✓ Intro video found: {intro_path}")
+            print(f"  Will be added at the beginning after main compilation")
         
         # Build FFmpeg command with filter_complex
         cmd = [self.ffmpeg_path]
@@ -306,7 +355,11 @@ class HorizontalVideoGenerator:
         filter_parts = []
         total_duration = 0
         
+        # Process clips (no intro in filter chain anymore)
+        input_offset = 0
+        
         for idx, clip_path in enumerate(clip_files):
+            input_idx = idx + input_offset  # Adjust for intro video
             clip_filename = os.path.basename(clip_path)
             side = self._get_side_for_clip(clip_filename)
             
@@ -359,12 +412,13 @@ class HorizontalVideoGenerator:
             print(f"Processing clip {idx + 1}/{len(clip_files)}: {clip_filename}")
             print(f"  Side: {side}, Crop: {crop_params['crop_w']}x{crop_params['crop_h']}, Overlay: {camera} @ {timestamp}")
             
-            # Create filter for this clip: crop -> scale -> overlay
+            # Create filter for this clip: crop -> scale -> fps -> overlay
             # Note: Using forward slashes for Windows paths works in FFmpeg
             filter_parts.append(
-                f"[{idx}:v]crop={crop_params['crop_w']}:{crop_params['crop_h']}:"
+                f"[{input_idx}:v]crop={crop_params['crop_w']}:{crop_params['crop_h']}:"
                 f"{crop_params['crop_x']}:{crop_params['crop_y']},"
                 f"scale={target_width}:{target_height},"
+                f"fps={self.config['fps']},"
                 f"drawtext=text='{overlay_text}'"
                 f":fontfile=C\\\\:/Windows/Fonts/arial.ttf"
                 f":fontsize=20"
@@ -374,25 +428,40 @@ class HorizontalVideoGenerator:
                 f":x=20"
                 f":y=20[v{idx}]"
             )
+            
+            # Normalize audio for this clip
+            filter_parts.append(
+                f"[{input_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a{idx}]"
+            )
         
-        # Concatenate all processed clips
-        concat_inputs = ''.join([f"[v{i}][{i}:a]" for i in range(len(clip_files))])
-        filter_parts.append(f"{concat_inputs}concat=n={len(clip_files)}:v=1:a=1[outv][outa]")
+        # Concatenate all processed clips (no intro here)
+        concat_inputs = ''.join([f"[v{i}][a{i}]" for i in range(len(clip_files))])
+        total_videos = len(clip_files)
+        
+        # Add concat filter with proper syntax
+        concat_filter = f"{concat_inputs}concat=n={total_videos}:v=1:a=1[outv][outa]"
+        filter_parts.append(concat_filter)
         
         # Complete filter_complex
         filter_complex = ';'.join(filter_parts)
         
-        # Write filter to temporary file to avoid command line length limits
-        filter_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
-        filter_file.write(filter_complex)
-        filter_file.close()
+        # Write filter to file in output directory for debugging
+        filter_filename = os.path.join(self.output_dir, 'debug_filter.txt')
+        with open(filter_filename, 'w', encoding='utf-8') as f:
+            f.write(filter_complex)
         
-        print(f"\n✓ Filter file created: {filter_file.name}")
-        # Debug: Show first filter for verification
-        if filter_parts:
-            print(f"  Sample filter: {filter_parts[0][:150]}...")
+        print(f"\n✓ Filter file created: {filter_filename}")
+        print(f"  Total filters: {len(filter_parts)}")
+        print(f"  Concatenating {total_videos} videos")
+        if has_intro:
+            print(f"  Intro streams: [vintro][aintro]")
+        print(f"  Clip streams: " + ', '.join([f"[v{i}][a{i}]" for i in range(min(3, len(clip_files)))]) + "...")
         
-        cmd.extend(['-filter_complex_script', filter_file.name])
+        # Debug: Show concat line
+        concat_line = filter_parts[-1]
+        print(f"  Concat filter: {concat_line[:200]}...")
+        
+        cmd.extend(['-filter_complex_script', filter_filename])
         cmd.extend(['-map', '[outv]', '-map', '[outa]'])
         
         # Add encoding parameters
@@ -504,15 +573,188 @@ class HorizontalVideoGenerator:
             
             if result_code == 0:
                 file_size = os.path.getsize(output_path) / (1024 * 1024)
-                print(f"✓ Video created successfully!")
+                print(f"✓ Main video created successfully!")
                 print(f"  Resolution: {target_width}x{target_height}")
                 print(f"  Clips combined: {len(clip_files)}")
                 print(f"  Zoom: {int((self.config['zoom_factor'] - 1) * 100)}%")
                 print(f"  Trim: {int(self.config['opposite_side_trim'] * 100)}% from opposite side")
                 print(f"  Encoder: {encoder_type}")
                 print(f"  File size: {file_size:.2f} MB")
-                print(f"  Location: {output_path}")
-                return output_path
+                
+                # Add intro if it exists
+                if has_intro:
+                    print(f"\n{'='*50}")
+                    print(f"Adding intro video at the beginning...")
+                    print(f"{'='*50}")
+                    
+                    try:
+                        # Create concat file list
+                        concat_list_path = os.path.join(self.output_dir, 'concat_list.txt')
+                        with open(concat_list_path, 'w', encoding='utf-8') as f:
+                            # Use absolute paths for concat
+                            f.write(f"file '{os.path.abspath(intro_path)}'\n")
+                            f.write(f"file '{os.path.abspath(output_path)}'\n")
+                        
+                        # Get total duration for progress
+                        intro_duration = self._get_video_duration(intro_path)
+                        main_duration = self._get_video_duration(output_path)
+                        concat_total_duration = intro_duration + main_duration
+                        
+                        # Try stream copy first (no re-encoding, minimal size increase)
+                        print(f"  Attempting fast concatenation (stream copy)...")
+                        concat_cmd_copy = [
+                            self.ffmpeg_path,
+                            '-f', 'concat',
+                            '-safe', '0',
+                            '-i', concat_list_path,
+                            '-c', 'copy',
+                            '-movflags', '+faststart',
+                            '-y', final_output_path
+                        ]
+                        
+                        # Try stream copy first
+                        try:
+                            result = subprocess.run(
+                                concat_cmd_copy,
+                                capture_output=True,
+                                text=True,
+                                timeout=60
+                            )
+                            
+                            if result.returncode == 0:
+                                # Stream copy succeeded
+                                os.remove(output_path)
+                                os.remove(concat_list_path)
+                                
+                                final_size = os.path.getsize(final_output_path) / (1024 * 1024)
+                                print(f"  ✓ Fast concatenation successful (no re-encoding)")
+                                print(f"  ✓ Intro added successfully!")
+                                print(f"  Encoder: Stream Copy (no re-encoding)")
+                                print(f"  Final file size: {final_size:.2f} MB")
+                                print(f"  Location: {final_output_path}")
+                                return final_output_path
+                        except:
+                            pass
+                        
+                        # Stream copy failed, need to re-encode with high compression
+                        print(f"  Stream copy failed, re-encoding with high compression...")
+                        
+                        # Build concat command with high compression encoding
+                        concat_cmd = [
+                            self.ffmpeg_path,
+                            '-f', 'concat',
+                            '-safe', '0',
+                            '-i', concat_list_path
+                        ]
+                        
+                        # Use GPU encoding with higher compression if available
+                        if self.gpu_available:
+                            concat_cmd.extend([
+                                '-c:v', 'h264_nvenc',
+                                '-preset', 'p7',  # Slower but better compression
+                                '-rc', 'vbr',
+                                '-cq', '28',  # Higher CQ = smaller file size
+                                '-b:v', '0',
+                                '-maxrate', '10M',
+                                '-bufsize', '20M'
+                            ])
+                        else:
+                            concat_cmd.extend([
+                                '-c:v', 'libx264',
+                                '-crf', '26',  # Higher CRF = smaller file size
+                                '-preset', 'slow'  # Slower but better compression
+                            ])
+                        
+                        concat_cmd.extend([
+                            '-c:a', 'aac',
+                            '-b:a', '128k',  # Reduced audio bitrate
+                            '-movflags', '+faststart',
+                            '-y', final_output_path
+                        ])
+                        
+                        # Execute with progress bar
+                        print(f"  Total duration: {concat_total_duration:.1f}s")
+                        print(f"  {'─'*50}")
+                        
+                        process = subprocess.Popen(
+                            concat_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                        )
+                        
+                        # Track progress
+                        start_time = time.time()
+                        last_time_sec = 0
+                        
+                        for line in process.stdout:
+                            if 'time=' in line:
+                                time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})', line)
+                                fps_match = re.search(r'fps=\s*(\d+\.?\d*)', line)
+                                speed_match = re.search(r'speed=\s*(\d+\.?\d*)x', line)
+                                
+                                if time_match:
+                                    hours = int(time_match.group(1))
+                                    minutes = int(time_match.group(2))
+                                    seconds = int(time_match.group(3))
+                                    current_sec = hours * 3600 + minutes * 60 + seconds
+                                    
+                                    if concat_total_duration > 0 and current_sec != last_time_sec:
+                                        progress = min(current_sec / concat_total_duration, 1.0)
+                                        percentage = int(progress * 100)
+                                        
+                                        bar_length = 50
+                                        filled = int(bar_length * progress)
+                                        bar = '█' * filled + '░' * (bar_length - filled)
+                                        
+                                        fps = fps_match.group(1) if fps_match else '0'
+                                        speed = speed_match.group(1) if speed_match else '0'
+                                        elapsed = time.time() - start_time
+                                        
+                                        if progress > 0:
+                                            eta = (elapsed / progress) - elapsed
+                                            eta_str = f"{int(eta//60):02d}:{int(eta%60):02d}"
+                                        else:
+                                            eta_str = "--:--"
+                                        
+                                        print(f"\rConcat: {percentage:3d}%|{bar}| {current_sec:.0f}/{concat_total_duration:.0f}s "
+                                              f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}<{eta_str}, {fps}fps, {speed}x]",
+                                              end='', flush=True)
+                                        
+                                        last_time_sec = current_sec
+                        
+                        process.wait()
+                        
+                        print(f"\rConcat: 100%|{'█'*50}| Completed!{' '*50}")
+                        print(f"  {'─'*50}")
+                        
+                        if process.returncode == 0:
+                            # Clean up temp files
+                            os.remove(output_path)
+                            os.remove(concat_list_path)
+                            
+                            final_size = os.path.getsize(final_output_path) / (1024 * 1024)
+                            concat_encoder = "GPU (NVENC High Compression)" if self.gpu_available else "CPU (x264 High Compression)"
+                            print(f"✓ Intro added successfully!")
+                            print(f"  Encoder: {concat_encoder}")
+                            print(f"  Final file size: {final_size:.2f} MB")
+                            print(f"  Location: {final_output_path}")
+                            return final_output_path
+                        else:
+                            print(f"✗ Concatenation failed with code {process.returncode}")
+                            return output_path
+                        
+                    except Exception as e:
+                        print(f"✗ Failed to add intro: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        print(f"  Main video saved at: {output_path}")
+                        return output_path
+                else:
+                    print(f"  Location: {output_path}")
+                    return output_path
             else:
                 print(f"✗ FFmpeg encoding failed with code {result_code}")
                 
@@ -523,7 +765,7 @@ class HorizontalVideoGenerator:
                         print(f"  {err_line}")
                     
                     # Also print the filter file for debugging
-                    print(f"\n⚠ Filter file location: {filter_file.name}")
+                    print(f"\n⚠ Filter file location: {filter_filename}")
                     print(f"  You can inspect it to debug the filter syntax")
                 
                 # Try CPU fallback if GPU failed
@@ -553,12 +795,10 @@ class HorizontalVideoGenerator:
             print(f"✗ Error running FFmpeg: {e}")
             return None
         finally:
-            # Clean up temporary filter file
-            try:
-                if os.path.exists(filter_file.name):
-                    os.unlink(filter_file.name)
-            except:
-                pass
+            # Clean up filter file (keep for debugging)
+            # Filter file kept at: horizontal_output/debug_filter.txt
+            pass
+
     
     def create_weekly_highlight(self, clip_files=None, output_name=None):
         """

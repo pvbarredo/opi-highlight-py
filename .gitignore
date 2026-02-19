@@ -25,6 +25,9 @@ wheels/
 
 # Video files (optional - remove if you want to track them)
 *.mp4
+# Exception: Allow intro video to be tracked
+!intro_video/
+!intro_video/horizontal_introduction.mp4
 *.avi
 *.mov
 *.mkv
