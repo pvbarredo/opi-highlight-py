@@ -114,10 +114,22 @@ class HorizontalVideoGenerator:
         Maps clip placement numbers to their data for overlay display.
         """
         try:
+            # Read CSV to get date from first row
+            df_full = pd.read_csv(self.csv_path, nrows=1, header=None)
+            csv_date = None
+            if df_full.shape[1] > 1:
+                # Date is in format like "2/11/2026"
+                date_str = str(df_full.iloc[0, 1]).strip()
+                try:
+                    from datetime import datetime as dt
+                    parsed_date = dt.strptime(date_str, "%m/%d/%Y")
+                    csv_date = parsed_date.strftime("%m%d%Y")  # Format as MMDDYYYY
+                    print(f"✓ CSV Date: {date_str} -> {csv_date}")
+                except:
+                    print(f"⚠ Could not parse date: {date_str}")
+            
             # Read CSV (skip date header row)
-            df = pd.read_csv(self.csv_path)
-            if 'Date' in df.columns and len(df.columns) > 3:
-                df = pd.read_csv(self.csv_path, skiprows=1)
+            df = pd.read_csv(self.csv_path, skiprows=1)
             
             # Find timestamp column
             timestamp_col = None
@@ -128,7 +140,7 @@ class HorizontalVideoGenerator:
             
             # Create mappings of placement to side and full data
             if 'Placement' in df.columns and 'Camera' in df.columns and timestamp_col:
-                for _, row in df.iterrows():
+                for idx, row in df.iterrows():
                     placement = row['Placement']
                     side = str(row['Side']).lower().strip() if 'Side' in df.columns and pd.notna(row['Side']) else 'center'
                     camera = str(row['Camera']).strip() if pd.notna(row['Camera']) else 'Unknown'
@@ -138,13 +150,17 @@ class HorizontalVideoGenerator:
                     self.clip_data[placement] = {
                         'camera': camera,
                         'timestamp': timestamp,
-                        'side': side
+                        'side': side,
+                        'date': csv_date
                     }
+                
                 print(f"✓ Loaded clip data for {len(self.clip_data)} clips")
             else:
                 print("⚠ CSV missing required columns (Placement, Camera, or timestamp)")
         except Exception as e:
             print(f"⚠ Could not load CSV clip data: {e}")
+            import traceback
+            traceback.print_exc()
             print("  Clips will be processed without overlay data")
     
     def _get_side_for_clip(self, clip_filename):
@@ -239,7 +255,8 @@ class HorizontalVideoGenerator:
     
     def _calculate_crop_params(self, original_width, original_height, side='center'):
         """
-        Calculate crop and scale parameters for FFmpeg filter.
+        Calculate crop parameters for FFmpeg filter.
+        Exposes only 70% of the video based on side, then scale filter zooms to fill resolution.
         
         Args:
             original_width (int): Original video width
@@ -249,55 +266,97 @@ class HorizontalVideoGenerator:
         Returns:
             dict: {'crop_x': int, 'crop_y': int, 'crop_w': int, 'crop_h': int}
         """
-        zoom = self.config['zoom_factor']
-        trim_percent = self.config['opposite_side_trim']
+        # Expose 70% of the video width (cuts 30% from opposite side)
+        exposure_percent = 0.70
         
-        # Calculate crop dimensions (zoom effect)
-        crop_width = int(original_width / zoom)
-        crop_height = int(original_height / zoom)
+        crop_width = int(original_width * exposure_percent)
+        crop_height = original_height  # Keep full height
         
-        # For stretched look, use full width with minimal trim
-        # This creates wider field of view
-        target_visible_width = int(crop_width * (1 - trim_percent * 0.5))  # Reduced trim by half for wider view
-        target_visible_height = crop_height
-        
-        # Calculate crop position
+        # Calculate crop position based on side
         if side == 'left':
+            # Show leftmost 70% (cuts 30% from right)
             crop_x = 0
-            crop_y = (original_height - target_visible_height) // 2
         elif side == 'right':
-            crop_x = original_width - target_visible_width
-            crop_y = (original_height - target_visible_height) // 2
+            # Show rightmost 70% (cuts 30% from left)
+            crop_x = original_width - crop_width
         else:  # center
-            crop_x = (original_width - target_visible_width) // 2
-            crop_y = (original_height - target_visible_height) // 2
+            # Center the 70% crop
+            crop_x = (original_width - crop_width) // 2
+        
+        crop_y = 0  # Start from top (full height)
         
         return {
             'crop_x': crop_x,
             'crop_y': crop_y,
-            'crop_w': target_visible_width,
-            'crop_h': target_visible_height
+            'crop_w': crop_width,
+            'crop_h': crop_height
         }
     
     def get_clip_files(self, pattern=None):
         """
-        Get all video clip files from the clips folder.
+        Get video clip files from the clips folder that are listed in timestamps.csv.
+        Matches clips by generating expected filename pattern from CSV data.
         
         Args:
             pattern (str): Optional filename pattern to filter clips
             
         Returns:
-            list: Sorted list of clip file paths
+            list: Sorted list of clip file paths (only clips in CSV)
         """
         video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
-        clips = []
+        all_clips = []
         
+        # Get all video files from clips folder
         for filename in os.listdir(self.clips_folder):
             if any(filename.lower().endswith(ext) for ext in video_extensions):
                 if pattern is None or pattern.lower() in filename.lower():
-                    clips.append(os.path.join(self.clips_folder, filename))
+                    all_clips.append(os.path.join(self.clips_folder, filename))
         
-        return sorted(clips)
+        # Filter to only include clips that match CSV entries
+        if self.clip_data:
+            filtered_clips = []
+            matched_placements = []
+            
+            for clip_path in all_clips:
+                filename = os.path.basename(clip_path)
+                matched = False
+                
+                # Try to match against each CSV entry
+                for placement, data in self.clip_data.items():
+                    camera = data.get('camera', '')
+                    timestamp = data.get('timestamp', '00:00:00')
+                    csv_date = data.get('date', '')
+                    
+                    # Convert timestamp HH:MM:SS to HH_MM_SS for filename
+                    time_for_filename = timestamp.replace(':', '_')
+                    
+                    # Generate expected filename pattern: {Camera}-{Date}_clip{Placement:02d}_{Time}
+                    if csv_date:
+                        expected_pattern = f"{camera}-{csv_date}_clip{placement:02d}_{time_for_filename}"
+                    else:
+                        # Fallback: just match by placement number
+                        expected_pattern = f"clip{placement:02d}"
+                    
+                    # Check if the filename contains this pattern
+                    if expected_pattern in filename:
+                        filtered_clips.append(clip_path)
+                        matched_placements.append(placement)
+                        matched = True
+                        break
+                
+                if not matched:
+                    print(f"  ✗ Skipping: {filename} (not in CSV)")
+            
+            if filtered_clips:
+                print(f"\n✓ Filtered to {len(filtered_clips)} clips from CSV (out of {len(all_clips)} total clips)")
+                print(f"  Matched placements: {sorted(matched_placements)}")
+                return sorted(filtered_clips)
+            else:
+                print(f"⚠ No clips matched CSV entries. Using all {len(all_clips)} clips.")
+                return sorted(all_clips)
+        else:
+            print(f"⚠ No CSV data loaded. Using all {len(all_clips)} clips.")
+            return sorted(all_clips)
     
     def create_weekly_highlight_gpu(self, clip_files=None, output_name=None):
         """
